@@ -31,7 +31,7 @@ Keyway lets you route LLM requests from any OpenAI/Anthropic-compatible client (
 #### Option 1: pip install
 
 ```bash
-pip install keyway
+pip install keyway-router
 
 # Generate a secret and create .env
 python -c "import secrets; print('KEYWAY_SECRET=' + secrets.token_urlsafe(48))" > .env
@@ -220,7 +220,7 @@ Keyway 是一个轻量级的可自部署 LLM 路由网关，支持 OpenAI 和 An
 #### 方式一：pip 安装
 
 ```bash
-pip install keyway
+pip install keyway-router
 
 # 生成密钥并创建 .env
 python -c "import secrets; print('KEYWAY_SECRET=' + secrets.token_urlsafe(48))" > .env
