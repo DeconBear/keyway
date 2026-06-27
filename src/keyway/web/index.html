@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Login — Keyway</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet" />
+  <style>
+    :root { --bg: #fafafa; --card: #fff; --border: #e0e0e0; --text: #111; --muted: #6b6b6b; --accent: #111; --err: #b00; --ok: #0a6; }
+    @media (prefers-color-scheme: dark) { :root { --bg: #0d0d0d; --card: #161616; --border: #2a2a2a; --text: #f0f0f0; --muted: #8a8a8a; --accent: #f0f0f0; } }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'IBM Plex Sans', sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; display: flex; align-items: center; justify-content: center; }
+    .login-card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 2rem 2.5rem; width: 100%; max-width: 400px; }
+    .login-card h1 { font-size: 1.4rem; font-weight: 500; margin-bottom: 0.3rem; }
+    .login-card .subtitle { font-size: 0.85rem; color: var(--muted); margin-bottom: 1.5rem; }
+    .login-card label { display: block; font-size: 0.78rem; color: var(--muted); margin-bottom: 0.3rem; }
+    .login-card input { width: 100%; padding: 0.6rem 0.8rem; font-size: 0.9rem; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); font-family: 'IBM Plex Mono', monospace; }
+    .login-card button { width: 100%; margin-top: 1rem; padding: 0.65rem; font-size: 0.9rem; border: 1px solid var(--accent); border-radius: 6px; background: var(--accent); color: var(--bg); cursor: pointer; font-family: inherit; }
+    .login-card button:hover { opacity: 0.85; }
+    .login-card .status { font-size: 0.82rem; color: var(--err); margin-top: 0.8rem; text-align: center; }
+    .login-card .hint { font-size: 0.78rem; color: var(--muted); margin-top: 1rem; line-height: 1.5; }
+    .brand { text-align: center; margin-bottom: 1.5rem; }
+    .brand .name { font-size: 1.75rem; font-weight: 600; letter-spacing: -0.02em; }
+    .brand .tagline { font-size: 0.78rem; color: var(--muted); }
+  </style>
+</head>
+<body>
+  <div class="login-card">
+    <div class="brand">
+      <div class="name">Keyway</div>
+      <div class="tagline">LLM Routing Gateway</div>
+    </div>
+    <h1>Admin Login</h1>
+    <p class="subtitle">Enter your admin token to access the management UI.</p>
+    <form id="login-form">
+      <label for="token">Admin Token</label>
+      <input type="password" id="token" name="token" placeholder="Paste your KEYWAY_ADMIN_TOKEN here" required autocomplete="off" />
+      <button type="submit">Login</button>
+      <div class="status" id="status"></div>
+    </form>
+    <p class="hint">
+      The admin token is set via <code>KEYWAY_ADMIN_TOKEN</code> in your <code>.env</code>.
+      If not set, a random token is generated and printed to the console on startup.
+    </p>
+  </div>
+  <script type="module">
+    const form = document.getElementById("login-form");
+    const status = document.getElementById("status");
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const token = document.getElementById("token").value;
+      status.textContent = "";
+      try {
+        const resp = await fetch("/admin/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ token }),
+        });
+        if (resp.ok) {
+          window.location.href = "/admin.html";
+        } else {
+          const data = await resp.json().catch(() => ({}));
+          status.textContent = data.detail || "Login failed";
+        }
+      } catch (err) {
+        status.textContent = "Network error: " + err.message;
+      }
+    });
+  </script>
+</body>
+</html>

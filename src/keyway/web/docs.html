@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Keyway — Integration Docs</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet" />
+  <style>
+    :root { --bg: #fafafa; --card: #fff; --border: #e0e0e0; --divider: #ececec; --text: #111; --muted: #6b6b6b; }
+    @media (prefers-color-scheme: dark) { :root { --bg: #0d0d0d; --card: #161616; --border: #2a2a2a; --divider: #2a2a2a; --text: #f0f0f0; --muted: #8a8a8a; } }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'IBM Plex Sans', sans-serif; background: var(--bg); color: var(--text); font-size: 14px; line-height: 1.6; }
+    .topbar { position: sticky; top: 0; z-index: 10; display: flex; align-items: center; justify-content: space-between; padding: 0.7rem 1.5rem; background: var(--card); border-bottom: 1px solid var(--border); }
+    .topbar .brand .name { font-size: 1.2rem; font-weight: 600; }
+    .topbar .brand .sub { font-size: 0.75rem; color: var(--muted); }
+    .topbar nav { display: flex; gap: 0.8rem; }
+    .topbar nav a { font-size: 0.85rem; color: var(--text); text-decoration: none; padding: 0.3rem 0.6rem; border-radius: 5px; }
+    .topbar nav a:hover { background: var(--bg); }
+    .shell { max-width: 860px; margin: 0 auto; padding: 1.5rem; }
+    h1 { font-size: 1.5rem; font-weight: 500; margin: 0 0 0.3rem; }
+    .lede { color: var(--muted); font-size: 0.92rem; margin: 0 0 1.5rem; }
+    h2 { font-size: 1.15rem; font-weight: 600; margin: 2rem 0 0.6rem; padding-bottom: 0.35rem; border-bottom: 1px solid var(--divider); }
+    h3 { font-size: 1rem; font-weight: 600; margin: 1.4rem 0 0.4rem; }
+    p { font-size: 0.9rem; margin: 0.5rem 0; }
+    ul, ol { font-size: 0.9rem; margin: 0.5rem 0; padding-left: 1.4rem; }
+    li { margin: 0.2rem 0; }
+    code { font-family: 'IBM Plex Mono', monospace; font-size: 0.82rem; background: var(--bg); padding: 1px 5px; border-radius: 3px; }
+    pre { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 0.8rem 1rem; overflow-x: auto; font-size: 0.8rem; line-height: 1.5; margin: 0.7rem 0; }
+    pre code { background: none; padding: 0; }
+    a { color: #1a5fb4; }
+    @media (prefers-color-scheme: dark) { a { color: #6cb6ff; } }
+    .note { border-left: 3px solid #f0c040; background: #fffbeb; padding: 0.6rem 0.9rem; margin: 0.8rem 0; font-size: 0.85rem; border-radius: 0 4px 4px 0; }
+    .warn { border-left: 3px solid #d33; background: #fff5f5; padding: 0.6rem 0.9rem; margin: 0.8rem 0; font-size: 0.85rem; border-radius: 0 4px 4px 0; }
+    @media (prefers-color-scheme: dark) { .note { background: #2a2300; } .warn { background: #2a0d0d; } }
+    table { width: 100%; border-collapse: collapse; font-size: 0.82rem; margin: 0.7rem 0; }
+    th, td { border: 1px solid var(--border); padding: 0.4rem 0.55rem; text-align: left; vertical-align: top; }
+    th { background: var(--bg); font-weight: 500; }
+    td code { white-space: nowrap; }
+    .pill { display: inline-block; font-size: 0.72rem; padding: 1px 6px; border-radius: 3px; }
+    .pill.openai { background: #e0e7ff; color: #3730a3; }
+    .pill.anthropic { background: #fef3c7; color: #92400e; }
+    .toc { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 0.8rem 1.1rem; margin: 1rem 0 1.5rem; font-size: 0.85rem; }
+    .toc h3 { margin: 0 0 0.4rem; font-size: 0.85rem; color: var(--muted); font-weight: 500; }
+    .toc ul { margin: 0; padding-left: 1rem; }
+    .provider-card { border: 1px solid var(--border); border-radius: 10px; padding: 1rem 1.25rem; margin: 1rem 0; background: var(--card); }
+    .provider-card > h3 { margin-top: 0; }
+    .provider-card .links { font-size: 0.82rem; margin-top: 0.6rem; }
+    .provider-card .links a { margin-right: 0.8rem; }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="name">Keyway</span>
+      <span class="sub">Docs</span>
+    </div>
+    <nav>
+      <a href="/admin.html">Admin</a>
+    </nav>
+  </header>
+
+  <main class="shell">
+    <h1>Keyway Integration Guide</h1>
+    <p class="lede">A single <code>db_sk_</code> key lets you connect Claude Code (and any OpenAI/Anthropic SDK client) to Keyway, routing requests across DeepSeek / MiniMax / Volcengine Ark / Zhipu GLM / Qwen and more — just pick a model alias, no config changes needed.</p>
+
+    <div class="toc">
+      <h3>Contents</h3>
+      <ul>
+        <li><a href="#overview">1. How it works</a></li>
+        <li><a href="#endpoints">2. Keyway endpoints</a></li>
+        <li><a href="#claude-code">3. Connecting Claude Code</a></li>
+        <li><a href="#openai-sdk">4. Connecting OpenAI SDK</a></li>
+        <li><a href="#providers">5. Upstream providers</a></li>
+        <li><a href="#troubleshoot">6. Troubleshooting</a></li>
+      </ul>
+    </div>
+
+    <h2 id="overview">1. How it works</h2>
+    <p>Keyway is a <strong>routing gateway</strong>. Clients send requests using OpenAI or Anthropic protocol; Keyway resolves the model alias to the configured upstream provider and forwards:</p>
+    <ul>
+      <li><span class="pill openai">OpenAI</span> protocol clients → <code>POST /v1/chat/completions</code> → Keyway routes to an OpenAI-compatible upstream.</li>
+      <li><span class="pill anthropic">Anthropic</span> protocol clients → <code>POST /v1/messages</code> → Keyway routes to an Anthropic-compatible upstream.</li>
+    </ul>
+    <p>All upstream real API keys are stored encrypted on the Keyway server. Clients only hold a single <code>db_sk_</code> self-issued key.</p>
+    <div class="note">
+      <strong>Protocol matching:</strong> OpenAI inbound requires an OpenAI-protocol provider; Anthropic inbound requires an Anthropic-protocol provider. Cross-protocol returns 404. Make sure your route's provider protocol matches the client's protocol.
+    </div>
+
+    <h2 id="endpoints">2. Keyway endpoints</h2>
+    <table>
+      <tr><th>Purpose</th><th>Value</th></tr>
+      <tr><td>Base URL (OpenAI SDK)</td><td><code>http://localhost:9233/v1</code></td></tr>
+      <tr><td>Base URL (Anthropic SDK / Claude Code)</td><td><code>http://localhost:9233</code></td></tr>
+      <tr><td>OpenAI chat completions</td><td><code>POST /v1/chat/completions</code></td></tr>
+      <tr><td>OpenAI models list</td><td><code>GET /v1/models</code></td></tr>
+      <tr><td>Anthropic messages</td><td><code>POST /v1/messages</code></td></tr>
+      <tr><td>Anthropic token count</td><td><code>POST /v1/messages/count_tokens</code></td></tr>
+      <tr><td>Generic generation (image/video/3D)</td><td><code>POST /v1/generations</code></td></tr>
+      <tr><td>Authentication</td><td><code>Authorization: Bearer db_sk_…</code></td></tr>
+    </table>
+
+    <h2 id="claude-code">3. Connecting Claude Code</h2>
+    <h3>Step 1: Create a self-issued key</h3>
+    <p>Log in to the <a href="/admin.html">admin UI</a>, open a group, scroll to "Self-issued API Keys", create a key. The plaintext <code>db_sk_…</code> is shown once (you can re-retrieve it later as admin).</p>
+
+    <h3>Step 2: Configure Claude Code</h3>
+    <p>Use project-level config. Create <code>.claude/settings.local.json</code> in your project root:</p>
+    <pre><code>{
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://localhost:9233",
+    "ANTHROPIC_AUTH_TOKEN": "db_sk_your-key-here",
+    "ANTHROPIC_MODEL": "deepseek-v4-pro",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "deepseek-v4-pro",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "deepseek-v4-pro",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "deepseek-v4-pro"
+  }
+}</code></pre>
+    <table>
+      <tr><th>Field</th><th>Notes</th></tr>
+      <tr><td><code>ANTHROPIC_BASE_URL</code></td><td>Gateway address without trailing slash. Claude Code SDK auto-appends <code>/v1/messages</code>.</td></tr>
+      <tr><td><code>ANTHROPIC_AUTH_TOKEN</code></td><td>Use <code>AUTH_TOKEN</code> (sends <code>Authorization: Bearer</code>). Avoid <code>ANTHROPIC_API_KEY</code> which has interactive confirmation issues.</td></tr>
+      <tr><td><code>ANTHROPIC_MODEL</code></td><td>Main model = route alias. Can also <code>/model &lt;alias&gt;</code> in-session.</td></tr>
+      <tr><td><code>ANTHROPIC_DEFAULT_*_MODEL</code></td><td><strong>Must</strong> all be valid aliases. Background tasks use these; leaving default <code>claude-haiku-…</code> will 404 if no such alias exists.</td></tr>
+    </table>
+    <div class="warn">
+      Add <code>.claude/settings.local.json</code> to your <code>.gitignore</code> — otherwise your key enters git.
+    </div>
+
+    <h3>Step 3: Verify</h3>
+    <p>Test with curl first (bypasses Claude Code for easier debugging):</p>
+    <pre><code>curl -X POST http://localhost:9233/v1/messages \
+  -H "Authorization: Bearer db_sk_your-key" \
+  -H "anthropic-version: 2023-06-01" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"deepseek-v4-pro","max_tokens":16,"messages":[{"role":"user","content":"Reply with OK."}]}'</code></pre>
+    <p>Should return <code>{"id":"msg_…","type":"message","content":[{"type":"text","text":"…"}],…}</code>.</p>
+
+    <h2 id="openai-sdk">4. Connecting OpenAI SDK (Python)</h2>
+    <pre><code>from openai import OpenAI
+
+client = OpenAI(
+    base_url="http://localhost:9233/v1",
+    api_key="db_sk_your-key-here",
+)
+
+resp = client.chat.completions.create(
+    model="deepseek-v4-pro",  # your route alias
+    messages=[{"role": "user", "content": "Hello!"}],
+)
+print(resp.choices[0].message.content)</code></pre>
+    <p>For streaming, add <code>stream=True</code>. The <code>/v1/models</code> endpoint lists all enabled route aliases as models.</p>
+
+    <h2 id="providers">5. Upstream providers</h2>
+    <div class="note">
+      <strong>Keyway config:</strong> Create a provider with the Base URL and API Key, then create a route with your chosen alias and the exact upstream model ID from the tables below. Model IDs change frequently — always verify on the provider's console.
+    </div>
+
+    <div class="provider-card">
+      <h3>DeepSeek</h3>
+      <p><span class="pill openai">OpenAI</span> Base URL: <code>https://api.deepseek.com/v1</code></p>
+      <table>
+        <tr><th>Model ID</th><th>Reasoning</th><th>Streaming</th><th>Tools</th><th>Context</th></tr>
+        <tr><td><code>deepseek-chat</code></td><td>No</td><td>Yes</td><td>Yes</td><td>64K</td></tr>
+        <tr><td><code>deepseek-reasoner</code></td><td>Yes</td><td>Yes</td><td>Yes</td><td>64K</td></tr>
+      </table>
+      <div class="links">
+        <a href="https://api-docs.deepseek.com/" target="_blank" rel="noreferrer">API Docs</a>
+        <a href="https://platform.deepseek.com/" target="_blank" rel="noreferrer">Console / API Key</a>
+      </div>
+    </div>
+
+    <div class="provider-card">
+      <h3>OpenAI</h3>
+      <p><span class="pill openai">OpenAI</span> Base URL: <code>https://api.openai.com/v1</code></p>
+      <table>
+        <tr><th>Model ID</th><th>Reasoning</th><th>Streaming</th><th>Tools</th></tr>
+        <tr><td><code>gpt-4o</code></td><td>No</td><td>Yes</td><td>Yes</td></tr>
+        <tr><td><code>gpt-4o-mini</code></td><td>No</td><td>Yes</td><td>Yes</td></tr>
+        <tr><td><code>o3-mini</code></td><td>Yes</td><td>Yes</td><td>Yes</td></tr>
+      </table>
+      <div class="links">
+        <a href="https://platform.openai.com/docs" target="_blank" rel="noreferrer">API Docs</a>
+        <a href="https://platform.openai.com/api-keys" target="_blank" rel="noreferrer">Console / API Key</a>
+      </div>
+    </div>
+
+    <div class="provider-card">
+      <h3>Anthropic</h3>
+      <p><span class="pill anthropic">Anthropic</span> Base URL: <code>https://api.anthropic.com</code> (Keyway appends <code>/v1/messages</code>)</p>
+      <table>
+        <tr><th>Model ID</th><th>Reasoning</th><th>Streaming</th><th>Tools</th></tr>
+        <tr><td><code>claude-sonnet-4-20250514</code></td><td>Extended thinking</td><td>Yes</td><td>Yes</td></tr>
+        <tr><td><code>claude-opus-4-20250514</code></td><td>Extended thinking</td><td>Yes</td><td>Yes</td></tr>
+        <tr><td><code>claude-haiku-4-20250506</code></td><td>No</td><td>Yes</td><td>Yes</td></tr>
+      </table>
+      <div class="links">
+        <a href="https://docs.anthropic.com/" target="_blank" rel="noreferrer">API Docs</a>
+        <a href="https://console.anthropic.com/" target="_blank" rel="noreferrer">Console / API Key</a>
+      </div>
+    </div>
+
+    <div class="provider-card">
+      <h3>Volcengine Ark (Doubao)</h3>
+      <p><span class="pill openai">OpenAI</span> Base URL: <code>https://ark.cn-beijing.volces.com/api/v3</code></p>
+      <table>
+        <tr><th>Model ID</th><th>Reasoning</th><th>Streaming</th><th>Tools</th></tr>
+        <tr><td><code>doubao-seed-1-6-250615</code></td><td>No</td><td>Yes</td><td>Yes</td></tr>
+        <tr><td><code>doubao-seed-1-6-thinking-250615</code></td><td>Yes</td><td>Yes</td><td>Yes</td></tr>
+      </table>
+      <div class="links">
+        <a href="https://www.volcengine.com/docs/82379" target="_blank" rel="noreferrer">Ark Docs</a>
+        <a href="https://console.volcengine.com/ark/region:cn-beijing/apiKey" target="_blank" rel="noreferrer">API Key</a>
+      </div>
+    </div>
+
+    <div class="provider-card">
+      <h3>Zhipu GLM</h3>
+      <p><span class="pill openai">OpenAI</span> Base URL: <code>https://open.bigmodel.cn/api/paas/v4</code></p>
+      <table>
+        <tr><th>Model ID</th><th>Reasoning</th><th>Streaming</th><th>Tools</th></tr>
+        <tr><td><code>glm-4-plus</code></td><td>No</td><td>Yes</td><td>Yes</td></tr>
+        <tr><td><code>glm-4-flash</code></td><td>No</td><td>Yes</td><td>Yes</td></tr>
+      </table>
+      <div class="links">
+        <a href="https://open.bigmodel.cn/" target="_blank" rel="noreferrer">Console / API Key</a>
+      </div>
+    </div>
+
+    <div class="provider-card">
+      <h3>Qwen (DashScope)</h3>
+      <p><span class="pill openai">OpenAI</span> Base URL: <code>https://dashscope.aliyuncs.com/compatible-mode/v1</code></p>
+      <table>
+        <tr><th>Model ID</th><th>Streaming</th><th>Tools</th></tr>
+        <tr><td><code>qwen-plus</code></td><td>Yes</td><td>Yes</td></tr>
+        <tr><td><code>qwen-turbo</code></td><td>Yes</td><td>Yes</td></tr>
+      </table>
+      <div class="links">
+        <a href="https://platform.qianwenai.com/" target="_blank" rel="noreferrer">Console</a>
+      </div>
+    </div>
+
+    <h2 id="troubleshoot">6. Troubleshooting</h2>
+    <h3>404 "model not found"</h3>
+    <p>Alias is misspelled, route is disabled, or provider is disabled. Check the admin UI or run "E2E Test".</p>
+    <h3>404 "model is bound to X provider, not openai/anthropic"</h3>
+    <p>Your route's provider protocol doesn't match the client's protocol. An OpenAI client needs an OpenAI-protocol provider; an Anthropic client needs an Anthropic-protocol provider.</p>
+    <h3>502 upstream error</h3>
+    <p>Check the request logs in the admin UI — they show the upstream status code and error message. Common causes: invalid upstream API key, wrong model name, or the model doesn't support the requested feature.</p>
+    <h3>Claude Code can't connect</h3>
+    <ul>
+      <li>Ensure <code>ANTHROPIC_BASE_URL</code> has <strong>no trailing slash</strong>.</li>
+      <li>Use <code>ANTHROPIC_AUTH_TOKEN</code> not <code>ANTHROPIC_API_KEY</code>.</li>
+      <li>Make sure all <code>ANTHROPIC_DEFAULT_*_MODEL</code> values are valid aliases.</li>
+    </ul>
+  </main>
+</body>
+</html>

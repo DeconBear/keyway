@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "keyway"
+version = "0.1.0"
+description = "A lightweight self-hosted LLM routing gateway with OpenAI & Anthropic dual-protocol support"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+authors = [{ name = "Keyway Contributors" }]
+keywords = ["llm", "router", "gateway", "openai", "anthropic", "proxy", "claude"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Framework :: FastAPI",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Internet :: Proxy Servers",
+]
+dependencies = [
+    "fastapi>=0.100.0",
+    "uvicorn>=0.23.0",
+    "httpx>=0.27.0",
+    "cryptography>=42.0.0",
+    "pydantic>=2.0.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0.0", "httpx>=0.27.0"]
+
+[project.urls]
+Homepage = "https://github.com/your-org/keyway"
+Issues = "https://github.com/your-org/keyway/issues"
+
+[project.scripts]
+keyway = "keyway.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+keyway = ["web/**/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
