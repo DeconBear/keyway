@@ -36,8 +36,8 @@ dependencies = [
 dev = ["pytest>=7.0.0", "httpx>=0.27.0"]
 
 [project.urls]
-Homepage = "https://github.com/your-org/keyway"
-Issues = "https://github.com/your-org/keyway/issues"
+Homepage = "https://github.com/keyway-gateway/keyway"
+Issues = "https://github.com/keyway-gateway/keyway/issues"
 
 [project.scripts]
 keyway = "keyway.__main__:main"
