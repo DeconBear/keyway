@@ -1,0 +1,22 @@
+# Keyway — LLM Routing Gateway
+# docker-compose up  →  http://localhost:9233
+
+services:
+  keyway:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    ports:
+      - "9233:9233"
+    volumes:
+      - keyway-data:/data
+    environment:
+      # REQUIRED: set a strong random secret (generate with: python -c "import secrets; print(secrets.token_urlsafe(48))")
+      KEYWAY_SECRET: ${KEYWAY_SECRET:?KEYWAY_SECRET must be set in .env or environment}
+      # Admin token for the management UI. If empty, a random one is generated on each start.
+      KEYWAY_ADMIN_TOKEN: ${KEYWAY_ADMIN_TOKEN:-}
+      KEYWAY_PUBLIC_BASE_URL: ${KEYWAY_PUBLIC_BASE_URL:-http://localhost:9233}
+    restart: unless-stopped
+
+volumes:
+  keyway-data:

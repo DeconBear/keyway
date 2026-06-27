@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Keyway — LLM Router Admin</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet" />
+  <style>
+    :root { --bg: #fafafa; --card: #fff; --border: #e0e0e0; --divider: #ececec; --text: #111; --muted: #6b6b6b; --accent: #111; --err: #b00; --ok: #0a6; }
+    @media (prefers-color-scheme: dark) { :root { --bg: #0d0d0d; --card: #161616; --border: #2a2a2a; --divider: #2a2a2a; --text: #f0f0f0; --muted: #8a8a8a; --accent: #f0f0f0; } }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'IBM Plex Sans', sans-serif; background: var(--bg); color: var(--text); font-size: 14px; line-height: 1.5; }
+    .topbar { position: sticky; top: 0; z-index: 10; display: flex; align-items: center; justify-content: space-between; padding: 0.7rem 1.5rem; background: var(--card); border-bottom: 1px solid var(--border); }
+    .topbar .brand { display: flex; align-items: center; gap: 0.5rem; }
+    .topbar .brand .name { font-size: 1.2rem; font-weight: 600; letter-spacing: -0.01em; }
+    .topbar .brand .sub { font-size: 0.75rem; color: var(--muted); }
+    .topbar nav { display: flex; gap: 0.8rem; align-items: center; }
+    .topbar nav a { font-size: 0.85rem; color: var(--text); text-decoration: none; padding: 0.3rem 0.6rem; border-radius: 5px; }
+    .topbar nav a:hover { background: var(--bg); }
+    .shell { max-width: 980px; margin: 0 auto; padding: 1.5rem; }
+    .section { margin-bottom: 1.75rem; padding: 1.1rem 1.25rem; border: 1px solid var(--border); border-radius: 10px; background: var(--card); }
+    .section h2 { font-size: 1.05rem; font-weight: 500; margin: 0 0 0.9rem; }
+    .section .meta { font-size: 0.78rem; color: var(--muted); margin-bottom: 0.6rem; }
+    .form { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 0.5rem 0.6rem; align-items: end; margin-bottom: 0.75rem; }
+    .form label { font-size: 0.75rem; color: var(--muted); display: block; margin-bottom: 0.2rem; }
+    .form input, .form select, .form textarea { width: 100%; padding: 0.45rem 0.6rem; font-size: 0.85rem; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); font-family: inherit; }
+    .form textarea { resize: vertical; min-height: 2.5rem; }
+    .form .full { grid-column: 1 / -1; }
+    .form .actions { grid-column: 1 / -1; display: flex; gap: 0.4rem; }
+    .form button { padding: 0.5rem 1rem; font-size: 0.88rem; border-radius: 6px; cursor: pointer; font-family: inherit; }
+    .form button.primary { background: var(--accent); color: var(--bg); border: 1px solid var(--accent); }
+    .form button.primary:hover { opacity: 0.85; }
+    .form button.ghost { background: var(--card); color: var(--text); border: 1px solid var(--border); }
+    .form button.ghost:hover { background: var(--bg); }
+    .list { display: flex; flex-direction: column; gap: 0.4rem; }
+    .list:empty::before { content: "(empty)"; color: var(--muted); font-size: 0.85rem; padding: 0.4rem 0; }
+    .item { display: flex; gap: 0.5rem; align-items: center; padding: 0.55rem 0.7rem; border: 1px solid var(--divider); border-radius: 6px; background: var(--bg); font-size: 0.85rem; }
+    .item .id { font-family: 'IBM Plex Mono', monospace; font-size: 0.8rem; color: var(--muted); }
+    .item .grow { flex: 1; min-width: 0; }
+    .item .grow .ellipsis { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .item button { padding: 0.3rem 0.7rem; font-size: 0.78rem; border: 1px solid var(--border); border-radius: 5px; background: var(--card); color: var(--text); cursor: pointer; }
+    .item button:hover { background: var(--bg); }
+    .item button.danger { color: var(--err); }
+    .item button.danger:hover { background: #fce4e4; }
+    @media (prefers-color-scheme: dark) { .item button.danger:hover { background: #2a0d0d; } }
+    .log-table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+    .log-table th, .log-table td { padding: 0.4rem 0.5rem; border-bottom: 1px solid var(--divider); text-align: left; vertical-align: top; }
+    .log-table th { font-weight: 500; color: var(--muted); background: var(--bg); }
+    .log-table td .mono { font-family: 'IBM Plex Mono', monospace; font-size: 0.78rem; }
+    .log-table td.err { color: var(--err); }
+    .status { font-size: 0.82rem; color: var(--muted); margin-left: 0.4rem; }
+    .status.ok { color: var(--ok); }
+    .status.err { color: var(--err); }
+    .toolbar { display: flex; justify-content: space-between; align-items: baseline; margin: 1.5rem 0 1.25rem; padding-bottom: 0.75rem; border-bottom: 1px solid var(--divider); }
+    .toolbar h1 { font-size: 1.5rem; font-weight: 500; }
+    .toolbar .actions button { padding: 0.4rem 0.85rem; font-size: 0.85rem; border: 1px solid var(--accent); border-radius: 6px; background: var(--accent); color: var(--bg); cursor: pointer; }
+    .toolbar .actions button:hover { opacity: 0.85; }
+    .gate { max-width: 480px; margin: 3rem auto; padding: 1.5rem; border: 1px solid var(--border); border-radius: 10px; background: var(--card); text-align: center; }
+    .gate h1 { font-size: 1.25rem; margin: 0 0 0.6rem; }
+    .gate p { margin: 0; color: var(--muted); }
+    .gate a { font-size: 0.85rem; }
+    .pill { display: inline-block; font-size: 0.7rem; padding: 1px 6px; border-radius: 3px; }
+    .pill.openai { background: #e0e7ff; color: #3730a3; }
+    .pill.anthropic { background: #fef3c7; color: #92400e; }
+    .pill.enabled { background: #dcfce7; color: #166534; }
+    .pill.disabled { background: #fee2e2; color: #991b1b; }
+    .pill.default { background: #e0e7ff; color: #3730a3; }
+    @media (prefers-color-scheme: dark) { .pill.openai { background: #1a1a3a; color: #a5b4fc; } .pill.anthropic { background: #3a2a0a; color: #fcd34d; } .pill.enabled { background: #0a3a1a; color: #4ade80; } .pill.disabled { background: #3a0a0a; color: #f87171; } .pill.default { background: #1a1a3a; color: #a5b4fc; } }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="name">Keyway</span>
+      <span class="sub">LLM Router</span>
+    </div>
+    <nav>
+      <a href="/docs.html">Docs</a>
+      <a href="#" id="logout-link">Logout</a>
+    </nav>
+  </header>
+
+  <main class="shell">
+    <div id="gate" class="gate" style="display:none;">
+      <h1>Authentication required</h1>
+      <p>Please <a href="/">log in</a> with your admin token.</p>
+    </div>
+
+    <div id="shell" style="display:none;">
+
+      <div id="list-view" style="display:none;">
+        <div class="toolbar">
+          <h1>Routing Groups</h1>
+          <div class="actions">
+            <button data-action="new-group" type="button">+ New Group</button>
+          </div>
+        </div>
+        <div id="group-list" class="list"></div>
+      </div>
+
+      <div id="detail-view" style="display:none;">
+        <div id="detail-head" style="margin: 1.5rem 0 1.25rem; padding-bottom: 0.75rem; border-bottom: 1px solid var(--divider); display:flex; justify-content:space-between; align-items:center; gap:0.5rem;">
+          <span id="detail-head-info" style="flex:1; min-width:0;"></span>
+          <button data-action="new-group" type="button" style="background:transparent;border:1px solid var(--border);color:var(--text);padding:0.3rem 0.7rem;border-radius:5px;cursor:pointer;font-size:0.82rem;">+ New Group</button>
+        </div>
+
+        <section class="section" id="providers">
+          <h2>Upstream Providers</h2>
+          <p class="meta">Each provider is an upstream service (e.g. DeepSeek / OpenAI / Anthropic). API key is shown once on creation; as admin you can view/copy it later.</p>
+          <form id="provider-form" class="form">
+            <input type="hidden" name="_edit_id" id="provider-edit-id" />
+            <div><label>ID (slug)</label><input name="provider_id" id="provider-id-input" required pattern="[a-z0-9._-]{1,64}" placeholder="deepseek" /></div>
+            <div><label>Name</label><input name="name" required placeholder="DeepSeek" /></div>
+            <div><label>Protocol</label>
+              <select name="protocol" id="provider-protocol">
+                <option value="openai" selected>OpenAI compatible (chat/completions + Bearer)</option>
+                <option value="anthropic">Anthropic compatible (/v1/messages + x-api-key)</option>
+              </select>
+            </div>
+            <div class="full"><label>Base URL</label><input name="base_url" id="provider-base-url" required type="url" placeholder="https://api.deepseek.com/v1" /></div>
+            <div class="full"><label>API Key</label><input name="api_key" id="provider-api-key" type="password" autocomplete="new-password" placeholder="sk-..." /></div>
+            <div class="full"><label>Note (optional)</label><input name="note" placeholder="local test" /></div>
+            <div class="actions">
+              <button type="submit" class="primary" id="provider-submit">Add Provider</button>
+              <button type="button" id="provider-cancel" class="ghost" style="display:none;">Cancel</button>
+              <button type="button" id="provider-test" class="ghost" style="display:none;">Test</button>
+              <span id="provider-status" class="status"></span>
+            </div>
+          </form>
+          <div id="provider-list" class="list"></div>
+        </section>
+
+        <section class="section" id="routes">
+          <h2>Model Routes</h2>
+          <p class="meta">An alias is the user-facing model name (e.g. <code>deepseek-v4-pro</code>), routed to this group's provider upstream model.</p>
+          <form id="route-form" class="form">
+            <input type="hidden" name="_edit_id" id="route-edit-id" />
+            <div><label>Alias (client-facing)</label><input name="alias" required placeholder="deepseek-v4-pro" /></div>
+            <div><label>Provider</label><select name="provider_id" required id="route-provider-select"></select></div>
+            <div><label>Upstream Model</label><input name="upstream_model" required placeholder="deepseek-reasoner" /></div>
+            <div><label>Enabled</label><select name="enabled"><option value="1">Yes</option><option value="0">No</option></select></div>
+            <div class="full"><label>Upstream Path (for generation endpoints)</label><input name="upstream_path" placeholder="services/aigc/text2image/image-synthesis" /></div>
+            <div class="full"><label>Note (optional)</label><input name="note" /></div>
+            <div class="actions">
+              <button type="submit" class="primary" id="route-submit">Add Route</button>
+              <button type="button" id="route-cancel" class="ghost" style="display:none;">Cancel</button>
+              <span id="route-status" class="status"></span>
+            </div>
+          </form>
+          <div id="route-list" class="list"></div>
+        </section>
+
+        <section class="section" id="tool-providers">
+          <h2>Tool Providers (built-in tool keys)</h2>
+          <p class="meta">Provide keys for built-in tools (e.g. Tavily) exposed to LLMs in this group. When enabled, the router auto-injects tool schemas into OpenAI chat requests.</p>
+          <form id="tool-form" class="form">
+            <div><label>Tool ID</label><input name="tool_id" required placeholder="tavily" /></div>
+            <div><label>Name</label><input name="name" required placeholder="Tavily" /></div>
+            <div class="full"><label>API Key</label><input name="api_key" required type="password" placeholder="tvly-..." /></div>
+            <div class="actions">
+              <button type="submit" class="primary">Add</button>
+              <span id="tool-status" class="status"></span>
+            </div>
+          </form>
+          <div id="tool-list" class="list"></div>
+        </section>
+
+        <section class="section" id="keys">
+          <h2>Self-issued API Keys (db_sk_)</h2>
+          <p class="meta">Keys for clients (Claude Code, Cursor, OpenAI SDK). The model field uses the alias above. Plaintext is shown once; admin can re-retrieve it. Keys are bound to this group — a client's key can only route to this group's providers/routes/tools.</p>
+          <form id="key-form" class="form">
+            <div><label>Name</label><input name="name" required placeholder="claude-code" /></div>
+            <div><label>Expires (ISO, empty = never)</label><input name="expires_at" placeholder="2027-01-01T00:00:00" /></div>
+            <div class="actions">
+              <button type="submit" class="primary">Create Key</button>
+              <span id="key-status" class="status"></span>
+            </div>
+          </form>
+          <div id="key-result" style="display:none; margin-top: 0.5rem; padding: 0.75rem; border: 1px solid #f5c6c6; border-radius: 6px; background: #fff7f7; font-family: 'IBM Plex Mono', monospace; font-size: 0.9rem; word-break: break-all;">
+            <div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.4rem;">
+              <span style="font-size: 0.78rem; color: #b00; font-weight: 500; font-family: 'IBM Plex Sans', sans-serif;">Save this now</span>
+              <button type="button" id="key-result-copy" style="margin-left:auto;font-size:0.75rem;padding:2px 8px;border:1px solid #b00;background:#fff;color:#b00;border-radius:4px;cursor:pointer;">Copy</button>
+            </div>
+            <div id="key-plaintext"></div>
+            <div id="key-result-baseurls" style="margin-top:0.6rem;padding-top:0.5rem;border-top:1px dashed #e0c0c0;font-family:'IBM Plex Sans',sans-serif;"></div>
+          </div>
+          <div id="key-list" class="list" style="margin-top: 0.6rem;"></div>
+        </section>
+      </div>
+
+      <section class="section" id="logs" style="margin-top: 1.5rem;">
+        <h2>Request Logs</h2>
+        <p class="meta">Recent upstream calls per key (alias / provider / status / latency / tokens). Across all groups.</p>
+        <div style="margin-bottom: 0.6rem; display:flex; gap:0.4rem; align-items:center; flex-wrap: wrap;">
+          <button id="e2e-run" type="button" style="padding: 0.4rem 0.85rem; font-size: 0.85rem; border: 1px solid var(--accent); border-radius: 6px; background: var(--accent); color: var(--bg); cursor: pointer;">Run E2E Test</button>
+          <span id="e2e-status" class="status"></span>
+          <label style="font-size: 0.78rem; color: var(--muted); margin-left: 0.4rem;">Key:</label>
+          <select id="log-key-select" style="padding: 0.4rem 0.6rem; font-size: 0.85rem; border: 1px solid var(--border); border-radius: 6px; background: var(--card); color: var(--text);"></select>
+          <button id="log-refresh" type="button" style="padding: 0.4rem 0.85rem; font-size: 0.85rem; border: 1px solid var(--border); border-radius: 6px; background: var(--card); color: var(--text); cursor: pointer; margin-left: 0.4rem;">Refresh</button>
+        </div>
+        <div id="log-list-wrap">
+          <table class="log-table">
+            <thead><tr><th>Time</th><th>alias</th><th>provider</th><th>upstream</th><th>status</th><th>latency</th><th>tokens</th><th>error</th></tr></thead>
+            <tbody id="log-tbody"></tbody>
+          </table>
+        </div>
+        <div id="e2e-results" style="display:none; margin-top: 1rem;"></div>
+      </section>
+
+      <pre id="output" style="margin-top: 1rem; padding: 0.6rem; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; font-size: 0.78rem; max-height: 200px; overflow: auto;"></pre>
+    </div>
+  </main>
+
+  <script type="module" src="/assets/admin.js"></script>
+</body>
+</html>
