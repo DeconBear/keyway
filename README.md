@@ -141,6 +141,93 @@ resp = client.chat.completions.create(
 )
 ```
 
+### Usage Example: Multi-Provider Setup
+
+This example configures four upstream models through Keyway, then connects Claude Code with the [CC Switch](https://github.com/farion1231/cc-switch) helper to switch between them on the fly.
+
+#### Step 1: Add four providers
+
+Open the admin UI (`http://localhost:9233/`), go to the "default" group, and create these providers:
+
+| Provider ID | Name | Protocol | Base URL | Where to get API Key |
+|---|---|---|---|---|
+| `deepseek` | DeepSeek | openai | `https://api.deepseek.com/v1` | https://platform.deepseek.com/ |
+| `zhipu` | Zhipu GLM | openai | `https://open.bigmodel.cn/api/paas/v4` | https://open.bigmodel.cn/ |
+| `minimax` | MiniMax | openai | `https://api.minimaxi.com/v1` | https://platform.minimaxi.com/ |
+| `moonshot` | Moonshot (Kimi) | openai | `https://api.moonshot.cn/v1` | https://platform.moonshot.cn/ |
+
+#### Step 2: Create four model routes
+
+In the same group, go to "Model Routes" and create:
+
+| Alias (client-facing) | Provider | Upstream Model |
+|---|---|---|
+| `deepseek-v4-pro` | deepseek | `deepseek-chat` |
+| `glm-5.2` | zhipu | `glm-4-plus` |
+| `minimax-m3` | minimax | `MiniMax-M3` |
+| `kimi-k2.7-code` | moonshot | `kimi-k2-0905-preview` |
+
+> Model IDs change frequently — verify the exact upstream model name on each provider's console.
+
+#### Step 3: Create an API key
+
+Go to "Self-issued API Keys", create a key (e.g. named "claude-code"). You'll get a `db_sk_...` plaintext. Save it.
+
+#### Step 4: Connect Claude Code
+
+Create `.claude/settings.local.json` in your project root (add it to `.gitignore`!):
+
+```json
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://localhost:9233",
+    "ANTHROPIC_AUTH_TOKEN": "db_sk_your-key-here",
+    "ANTHROPIC_MODEL": "deepseek-v4-pro",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "deepseek-v4-pro",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "deepseek-v4-pro",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "deepseek-v4-pro"
+  }
+}
+```
+
+> **Base URL rules** (local):
+> - **Anthropic SDK / Claude Code**: `http://localhost:9233` (no trailing slash; SDK auto-appends `/v1/messages`)
+> - **OpenAI SDK**: `http://localhost:9233/v1` (SDK appends `/chat/completions`)
+
+Switch models in-session with `/model glm-5.2` or `/model kimi-k2.7-code`.
+
+#### Step 5 (optional): Use CC Switch for model switching
+
+[CC Switch](https://github.com/farion1231/cc-switch) is a desktop GUI for managing Claude Code model profiles. With Keyway, you can create a profile per alias — all pointing to the same `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN`, just changing `ANTHROPIC_MODEL`:
+
+| Profile | ANTHROPIC_MODEL |
+|---|---|
+| DeepSeek | `deepseek-v4-pro` |
+| GLM | `glm-5.2` |
+| MiniMax | `minimax-m3` |
+| Kimi | `kimi-k2.7-code` |
+
+Switch between them with one click in CC Switch — no server restart, no key rotation.
+
+#### Step 6: Verify with curl
+
+```bash
+# OpenAI protocol
+curl http://localhost:9233/v1/chat/completions \
+  -H "Authorization: Bearer db_sk_your-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"glm-5.2","messages":[{"role":"user","content":"Hello!"}],"max_tokens":16}'
+
+# Anthropic protocol (for Anthropic-protocol upstreams only)
+curl http://localhost:9233/v1/messages \
+  -H "Authorization: Bearer db_sk_your-key" \
+  -H "anthropic-version: 2023-06-01" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"deepseek-v4-pro","messages":[{"role":"user","content":"Hello!"}],"max_tokens":16}'
+```
+
+> **Protocol note**: OpenAI-protocol clients (`/v1/chat/completions`) require OpenAI-protocol providers. Anthropic-protocol clients (`/v1/messages`) require Anthropic-protocol providers. All four providers in this example use OpenAI protocol, so use the OpenAI endpoint (`/v1/chat/completions`) for direct API calls. Claude Code uses the Anthropic endpoint (`/v1/messages`) — to use Claude Code with OpenAI-protocol upstreams, add an Anthropic-protocol provider (e.g. Anthropic itself) and create routes with the same aliases.
+
 ### API Reference
 
 #### Proxy endpoints (Bearer `db_sk_` auth)
@@ -329,6 +416,130 @@ resp = client.chat.completions.create(
     messages=[{"role": "user", "content": "你好！"}],
 )
 ```
+
+### 使用示例：多模型配置
+
+本示例通过 Keyway 配置四个上游模型，然后用 Claude Code 配合 [CC Switch](https://github.com/farion1231/cc-switch) 辅助工具实现一键切换。
+
+#### 第 1 步：添加四个 Provider
+
+打开管理界面（`http://localhost:9233/`），进入"default"组，创建以下 Provider：
+
+| Provider ID | 名称 | 协议 | Base URL | API Key 获取地址 |
+|---|---|---|---|---|
+| `deepseek` | DeepSeek | openai | `https://api.deepseek.com/v1` | https://platform.deepseek.com/ |
+| `zhipu` | 智谱 GLM | openai | `https://open.bigmodel.cn/api/paas/v4` | https://open.bigmodel.cn/ |
+| `minimax` | MiniMax | openai | `https://api.minimaxi.com/v1` | https://platform.minimaxi.com/ |
+| `moonshot` | Moonshot (Kimi) | openai | `https://api.moonshot.cn/v1` | https://platform.moonshot.cn/ |
+
+#### 第 2 步：创建四条模型路由
+
+在同一组中找到"Model Routes"，创建：
+
+| Alias（客户端使用） | Provider | 上游模型 |
+|---|---|---|
+| `deepseek-v4-pro` | deepseek | `deepseek-chat` |
+| `glm-5.2` | zhipu | `glm-4-plus` |
+| `minimax-m3` | minimax | `MiniMax-M3` |
+| `kimi-k2.7-code` | moonshot | `kimi-k2-0905-preview` |
+
+> 模型 ID 更新频繁，配置前请到各家控制台核对确切的上游模型名。
+
+#### 第 3 步：创建 API Key
+
+找到"Self-issued API Keys"，创建一个 Key（如命名为"claude-code"）。会得到 `db_sk_...` 明文，请妥善保存。
+
+#### 第 4 步：接入 Claude Code
+
+在项目根目录创建 `.claude/settings.local.json`（记得加入 `.gitignore`！）：
+
+```json
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://localhost:9233",
+    "ANTHROPIC_AUTH_TOKEN": "db_sk_你的key",
+    "ANTHROPIC_MODEL": "deepseek-v4-pro",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "deepseek-v4-pro",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "deepseek-v4-pro",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "deepseek-v4-pro"
+  }
+}
+```
+
+> **本地 Base URL 说明**：
+> - **Anthropic SDK / Claude Code**：`http://localhost:9233`（不带末尾斜杠；SDK 自动拼 `/v1/messages`）
+> - **OpenAI SDK**：`http://localhost:9233/v1`（SDK 自动拼 `/chat/completions`）
+
+在会话中用 `/model glm-5.2` 或 `/model kimi-k2.7-code` 切换模型。
+
+#### 第 5 步（可选）：用 CC Switch 辅助切换
+
+[CC Switch](https://github.com/farion1231/cc-switch) 是一个管理 Claude Code 模型配置的桌面 GUI。配合 Keyway，可以为每个 alias 创建一个 profile——都指向同一个 `ANTHROPIC_BASE_URL` 和 `ANTHROPIC_AUTH_TOKEN`，只需改 `ANTHROPIC_MODEL`：
+
+| Profile | ANTHROPIC_MODEL |
+|---|---|
+| DeepSeek | `deepseek-v4-pro` |
+| GLM | `glm-5.2` |
+| MiniMax | `minimax-m3` |
+| Kimi | `kimi-k2.7-code` |
+
+在 CC Switch 中一键切换——无需重启服务、无需轮换 Key。
+
+#### 第 6 步：用 curl 验证
+
+```bash
+# OpenAI 协议
+curl http://localhost:9233/v1/chat/completions \
+  -H "Authorization: Bearer db_sk_你的key" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"glm-5.2","messages":[{"role":"user","content":"你好！"}],"max_tokens":16}'
+
+# Anthropic 协议（仅限 Anthropic 协议的上游）
+curl http://localhost:9233/v1/messages \
+  -H "Authorization: Bearer db_sk_你的key" \
+  -H "anthropic-version: 2023-06-01" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"deepseek-v4-pro","messages":[{"role":"user","content":"你好！"}],"max_tokens":16}'
+```
+
+> **协议说明**：OpenAI 协议客户端（`/v1/chat/completions`）需要 OpenAI 协议的 Provider；Anthropic 协议客户端（`/v1/messages`）需要 Anthropic 协议的 Provider。本示例的四个 Provider 均为 OpenAI 协议，直接调用 API 时请用 OpenAI 端点（`/v1/chat/completions`）。Claude Code 走 Anthropic 端点（`/v1/messages`）——若要让 Claude Code 接入 OpenAI 协议上游，需添加一个 Anthropic 协议的 Provider（如 Anthropic 官方），然后用相同的 alias 创建路由。
+
+### API 参考
+
+#### 代理端点（Bearer `db_sk_` 鉴权）
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/v1/chat/completions` | OpenAI 兼容聊天补全（流式 + 非流式） |
+| `GET` | `/v1/models` | OpenAI 兼容模型列表（返回已启用的路由 alias） |
+| `POST` | `/v1/messages` | Anthropic Messages 兼容（流式 + 非流式） |
+| `POST` | `/v1/messages/count_tokens` | Anthropic token 计数估算 |
+| `POST` | `/v1/generations` | 通用生成转发（图片/视频/3D） |
+
+#### 管理端点（`X-Admin-Token` 头或 session cookie）
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/admin/login` | 管理员 token 登录 → session cookie |
+| `GET` | `/admin/session` | 验证会话 |
+| `POST` | `/admin/logout` | 登出 |
+| `GET` | `/admin/config` | 运行时配置（Base URL） |
+| `GET/POST` | `/admin/llm/groups` | 列出/创建组 |
+| `GET/PATCH/DELETE` | `/admin/llm/groups/{id}` | 查看/更新/删除组 |
+| `POST` | `/admin/llm/groups/{id}/copy` | 深拷贝组（重新签发新 key） |
+| `GET/POST` | `/admin/llm/groups/{id}/providers` | 列出/创建组内 Provider |
+| `GET/PATCH/DELETE` | `/admin/llm/providers/{id}` | 查看/更新/删除 Provider |
+| `GET/POST` | `/admin/llm/groups/{id}/routes` | 列出/创建组内路由 |
+| `GET/PATCH/DELETE` | `/admin/llm/routes/{id}` | 查看/更新/删除路由 |
+| `GET/POST` | `/admin/llm/groups/{id}/keys` | 列出/创建组内 API Key |
+| `GET` | `/admin/llm/keys/{id}/plaintext` | 取回 Key 明文（仅管理员） |
+| `PATCH/DELETE` | `/admin/llm/keys/{id}` | 更新/删除 API Key |
+| `GET/POST` | `/admin/llm/groups/{id}/tool-providers` | 列出/创建工具 Provider |
+| `PATCH/DELETE` | `/admin/llm/tool-providers/{id}` | 更新/删除工具 Provider |
+| `GET` | `/admin/llm/logs` | 请求日志（按 api_key_id、group_id 过滤） |
+| `GET` | `/admin/llm/stats` | 指定 Key 的统计 |
+| `POST` | `/admin/llm/test` | 探测单个 Provider 或路由 |
+| `POST` | `/admin/llm/e2e` | 所有已启用路由的端到端测试 |
 
 ### 开发
 
