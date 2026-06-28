@@ -34,6 +34,21 @@ from .llm_tools import (
 MAX_TOOL_ITERATIONS = 5
 
 
+class UpstreamError(RuntimeError):
+    """Raised when an upstream provider returns an error or is unreachable.
+
+    ``status_code`` is the HTTP status from the upstream (0 for transport
+    errors such as timeout / connection refused). ``retryable`` indicates
+    whether the caller should attempt the next candidate (5xx and transport
+    errors are retryable; 4xx are not).
+    """
+
+    def __init__(self, message: str, status_code: int = 0) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.retryable = status_code == 0 or status_code >= 500
+
+
 class LLMRouter:
     def __init__(self, store: LLMStore) -> None:
         self.store = store
@@ -63,6 +78,58 @@ class LLMRouter:
             return None
         return route, provider
 
+    def resolve_route_auto(
+        self, alias: str, *, group_id: str = "", required_protocol: str | None = None,
+    ) -> list[tuple[dict[str, Any], dict[str, Any], str]]:
+        """Resolve an alias to a ranked list of (route, provider, upstream_model)
+        candidates for auto-select / fusion modes.
+
+        Candidates come from the ``route_providers`` table (priority-ordered).
+        When no ``route_providers`` rows exist, the route's primary binding is
+        used as a single-element fallback so auto-select degrades gracefully.
+
+        Filters out: disabled routes, disabled providers, protocol mismatch,
+        and providers with open circuits.
+        Returns candidates sorted by priority (ascending).
+        """
+        if group_id:
+            route = self.store.get_route_by_alias_in_group(alias, group_id=group_id)
+        else:
+            route = self.store.get_route_by_alias(alias)
+        if not route or not route.get("enabled"):
+            return []
+
+        candidates: list[tuple[dict[str, Any], dict[str, Any], str, int]] = []
+        rps = self.store.list_route_providers(route["route_id"])
+        for rp in rps:
+            if not rp.get("enabled"):
+                continue
+            if group_id:
+                provider = self.store.get_provider_with_key_in_group(rp["provider_id"], group_id)
+            else:
+                provider = self.store.get_provider_with_key(rp["provider_id"])
+            if not provider or not provider.get("enabled"):
+                continue
+            if required_protocol and (provider.get("protocol") or "openai") != required_protocol:
+                continue
+            if self.store.is_circuit_open(provider.get("provider_id", "")):
+                continue
+            candidates.append((route, provider, rp["upstream_model"], int(rp.get("priority", 0))))
+
+        if not candidates:
+            # Fallback to primary binding (single-provider direct mode compat)
+            if group_id:
+                provider = self.store.get_provider_with_key_in_group(route["provider_id"], group_id)
+            else:
+                provider = self.store.get_provider_with_key(route["provider_id"])
+            if provider and provider.get("enabled"):
+                if not required_protocol or (provider.get("protocol") or "openai") == required_protocol:
+                    if not self.store.is_circuit_open(provider.get("provider_id", "")):
+                        candidates.append((route, provider, route["upstream_model"], 0))
+
+        candidates.sort(key=lambda c: c[3])
+        return [(r, p, m) for r, p, m, _ in candidates]
+
     def get_tool_definitions(self, group_id: str = "") -> list[dict[str, Any]]:
         """Return builtin tool schemas to inject into OpenAI calls."""
         if group_id:
@@ -90,8 +157,9 @@ class LLMRouter:
             async with client.stream("POST", url, json=body, headers=headers) as resp:
                 if resp.status_code >= 400:
                     body_bytes = await resp.aread()
-                    raise RuntimeError(
-                        f"upstream {resp.status_code}: {body_bytes.decode('utf-8', errors='replace')[:300]}"
+                    raise UpstreamError(
+                        f"upstream {resp.status_code}: {body_bytes.decode('utf-8', errors='replace')[:300]}",
+                        status_code=resp.status_code,
                     )
                 async for chunk in resp.aiter_bytes():
                     yield chunk
@@ -108,7 +176,7 @@ class LLMRouter:
         async with httpx.AsyncClient(timeout=httpx.Timeout(connect=10, read=300, write=30, pool=10)) as client:
             resp = await client.post(url, json=body, headers=headers)
         if resp.status_code >= 400:
-            raise RuntimeError(f"upstream {resp.status_code}: {resp.text[:300]}")
+            raise UpstreamError(f"upstream {resp.status_code}: {resp.text[:300]}", status_code=resp.status_code)
         return resp.json()
 
     async def _call_upstream_anthropic_stream(
@@ -125,8 +193,9 @@ class LLMRouter:
             async with client.stream("POST", url, json=body, headers=headers) as resp:
                 if resp.status_code >= 400:
                     body_bytes = await resp.aread()
-                    raise RuntimeError(
-                        f"upstream {resp.status_code}: {body_bytes.decode('utf-8', errors='replace')[:300]}"
+                    raise UpstreamError(
+                        f"upstream {resp.status_code}: {body_bytes.decode('utf-8', errors='replace')[:300]}",
+                        status_code=resp.status_code,
                     )
                 async for chunk in resp.aiter_bytes():
                     yield chunk
@@ -144,7 +213,7 @@ class LLMRouter:
         async with httpx.AsyncClient(timeout=httpx.Timeout(connect=10, read=300, write=30, pool=10)) as client:
             resp = await client.post(url, json=body, headers=headers)
         if resp.status_code >= 400:
-            raise RuntimeError(f"upstream {resp.status_code}: {resp.text[:300]}")
+            raise UpstreamError(f"upstream {resp.status_code}: {resp.text[:300]}", status_code=resp.status_code)
         return resp.json()
 
     # -------- generic forwarding for generation endpoints --------
@@ -191,7 +260,7 @@ class LLMRouter:
             async with httpx.AsyncClient(timeout=httpx.Timeout(connect=10, read=300, write=30, pool=10)) as client:
                 resp = await client.post(url, json=forward_body, headers=headers)
             if resp.status_code >= 400:
-                raise RuntimeError(f"upstream {resp.status_code}: {resp.text[:300]}")
+                raise UpstreamError(f"upstream {resp.status_code}: {resp.text[:300]}", status_code=resp.status_code)
             result = resp.json()
             latency = int((time.time() - start) * 1000)
             self._log(route["alias"], provider.get("group_id") or "",
@@ -337,6 +406,18 @@ class LLMRouter:
             else:
                 async for chunk in self._call_upstream_stream(provider, upstream_model, body):
                     yield chunk
+        except UpstreamError as exc:
+            error_msg = f"{type(exc).__name__}: {exc}"
+            status_code = exc.status_code or 502
+            if exc.retryable:
+                self.store.record_provider_failure(provider.get("provider_id", ""),
+                                                   provider.get("group_id") or "")
+            err = {"error": {"message": error_msg, "type": "router_error"}}
+            try:
+                yield f"data: {json.dumps(err)}\n\n".encode("utf-8")
+                yield b"data: [DONE]\n\n"
+            except Exception:
+                pass
         except Exception as exc:
             error_msg = f"{type(exc).__name__}: {exc}"
             err = {"error": {"message": error_msg, "type": "router_error"}}
@@ -401,15 +482,18 @@ class LLMRouter:
                             int(usage.get("output_tokens") or 0),
                             int((time.time() - iter_start) * 1000), "", api_key_id,
                         )
+                        self.store.record_provider_success(provider.get("provider_id", ""), group_id)
                         return resp_json
                     resp_json = await self._call_upstream_non_stream(provider, upstream_model, body)
-                except RuntimeError as exc:
+                except UpstreamError as exc:
                     iter_error = str(exc)
                     self._log(
                         route["alias"], group_id, provider.get("provider_id", ""),
-                        upstream_model, 502,
+                        upstream_model, exc.status_code or 502,
                         0, 0, int((time.time() - iter_start) * 1000), iter_error, api_key_id,
                     )
+                    if exc.retryable:
+                        self.store.record_provider_failure(provider.get("provider_id", ""), group_id)
                     raise
                 iter_status = 200
                 usage = resp_json.get("usage") or {}
@@ -420,6 +504,7 @@ class LLMRouter:
                     upstream_model, iter_status,
                     iter_req, iter_resp, int((time.time() - iter_start) * 1000), "", api_key_id,
                 )
+                self.store.record_provider_success(provider.get("provider_id", ""), group_id)
 
                 choice = (resp_json.get("choices") or [{}])[0]
                 message = choice.get("message") or {}
@@ -447,6 +532,65 @@ class LLMRouter:
         except Exception as exc:
             error_msg = f"{type(exc).__name__}: {exc}" if not error_msg else error_msg
             raise
+
+    # -------- auto-select (failover across candidates) --------
+    async def complete_auto_select(
+        self, req_body: dict[str, Any], *,
+        candidates: list[tuple[dict[str, Any], dict[str, Any], str]],
+        api_key_id: str | None = None, protocol: str | None = None,
+    ) -> dict[str, Any]:
+        """Try candidates in priority order until one succeeds.
+
+        Retryable errors (5xx, transport) trigger failover to the next
+        candidate. Non-retryable errors (4xx) are raised immediately.
+        Raises ``UpstreamError`` if all candidates fail.
+        """
+        if not candidates:
+            raise ValueError(f"no candidates for model alias: {req_body.get('model','')}")
+        last_exc: Exception | None = None
+        for route, provider, upstream_model in candidates:
+            resolved = (route, provider)
+            try:
+                body = dict(req_body)
+                return await self.complete(
+                    body, api_key_id=api_key_id, protocol=protocol, resolved=resolved,
+                )
+            except UpstreamError as exc:
+                last_exc = exc
+                if not exc.retryable:
+                    raise
+                continue
+            except ValueError:
+                raise
+        raise last_exc if last_exc else UpstreamError("all candidates failed")
+
+    async def stream_auto_select(
+        self, req_body: dict[str, Any], *,
+        candidates: list[tuple[dict[str, Any], dict[str, Any], str]],
+        api_key_id: str | None = None, protocol: str | None = None,
+    ) -> AsyncGenerator[bytes, None]:
+        """Stream from the highest-priority healthy candidate.
+
+        Streaming failover is limited: once bytes have been sent to the
+        client we cannot retry on a mid-stream failure. We stream from the
+        first candidate; the underlying ``stream`` method formats upstream
+        errors as SSE events for the client.
+        """
+        if not candidates:
+            err = {
+                "error": {"message": f"no candidates for model alias: {req_body.get('model','')}",
+                           "type": "invalid_request_error"}
+            }
+            yield f"data: {json.dumps(err)}\n\n".encode("utf-8")
+            yield b"data: [DONE]\n\n"
+            return
+        route, provider, upstream_model = candidates[0]
+        resolved = (route, provider)
+        body = dict(req_body)
+        async for chunk in self.stream(
+            body, api_key_id=api_key_id, protocol=protocol, resolved=resolved,
+        ):
+            yield chunk
 
     # -------- models list --------
     def list_models(self, group_id: str | None = None) -> dict[str, Any]:

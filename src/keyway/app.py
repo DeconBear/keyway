@@ -50,7 +50,7 @@ from fastapi.staticfiles import StaticFiles
 from . import crypto
 from .config import Settings, load_settings
 from .llm_keys import generate_key as _llm_generate_key, hash_key as _llm_hash_key, key_prefix as _llm_key_prefix
-from .llm_router import LLMRouter
+from .llm_router import LLMRouter, UpstreamError
 from .llm_store import LLMStore
 from .models import (
     AdminLoginRequest,
@@ -62,6 +62,8 @@ from .models import (
     LLMProviderCreateRequest,
     LLMProviderUpdateRequest,
     LLMRouteCreateRequest,
+    LLMRouteProviderCreateRequest,
+    LLMRouteProviderUpdateRequest,
     LLMRouteUpdateRequest,
     LLMTestRequest,
     LLMToolProviderCreateRequest,
@@ -129,7 +131,7 @@ def create_app() -> FastAPI:
     llm_router = LLMRouter(llm_store)
     sessions = _SessionStore()
 
-    app = FastAPI(title="Keyway", version="0.1.0", docs_url=None, redoc_url=None, openapi_url=None)
+    app = FastAPI(title="Keyway", version="0.2.0", docs_url=None, redoc_url=None, openapi_url=None)
 
     app.add_middleware(
         CORSMiddleware,
@@ -389,6 +391,7 @@ def create_app() -> FastAPI:
             r = llm_store.create_route_in_group(
                 group_id=group_id, alias=payload.alias, provider_id=payload.provider_id,
                 upstream_model=payload.upstream_model, upstream_path=payload.upstream_path, note=payload.note,
+                mode=payload.mode, adapter_config=payload.adapter_config, fusion_config=payload.fusion_config,
             )
         except ValueError as exc:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
@@ -407,11 +410,15 @@ def create_app() -> FastAPI:
         payload: LLMRouteUpdateRequest,
         _admin: dict = Depends(_require_admin),
     ) -> dict:
-        r = llm_store.update_route_in_group(
-            route_id=route_id, alias=payload.alias, provider_id=payload.provider_id,
-            upstream_model=payload.upstream_model, upstream_path=payload.upstream_path,
-            enabled=payload.enabled, note=payload.note,
-        )
+        try:
+            r = llm_store.update_route_in_group(
+                route_id=route_id, alias=payload.alias, provider_id=payload.provider_id,
+                upstream_model=payload.upstream_model, upstream_path=payload.upstream_path,
+                enabled=payload.enabled, note=payload.note,
+                mode=payload.mode, adapter_config=payload.adapter_config, fusion_config=payload.fusion_config,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
         if not r:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"route not found: {route_id}")
         return {"ok": True, "route": r}
@@ -421,6 +428,74 @@ def create_app() -> FastAPI:
         if not llm_store.delete_route_in_group(route_id):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"route not found: {route_id}")
         return {"ok": True, "message": f"route deleted: {route_id}"}
+
+    # ==================== Admin: route providers (multi-provider) ====================
+
+    @app.get("/admin/llm/routes/{route_id}/providers")
+    def admin_list_route_providers(route_id: str, _admin: dict = Depends(_require_admin)) -> dict:
+        if not llm_store.get_route(route_id):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"route not found: {route_id}")
+        return {"ok": True, "route_providers": llm_store.list_route_providers(route_id)}
+
+    @app.post("/admin/llm/routes/{route_id}/providers")
+    def admin_add_route_provider(
+        route_id: str,
+        payload: LLMRouteProviderCreateRequest,
+        _admin: dict = Depends(_require_admin),
+    ) -> dict:
+        try:
+            rp = llm_store.add_route_provider(
+                route_id=route_id, provider_id=payload.provider_id,
+                upstream_model=payload.upstream_model, priority=payload.priority,
+                enabled=payload.enabled,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+        except sqlite3.IntegrityError:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"provider '{payload.provider_id}' already associated with this route",
+            )
+        return {"ok": True, "route_provider": rp}
+
+    @app.patch("/admin/llm/route-providers/{rp_id}")
+    def admin_update_route_provider(
+        rp_id: str,
+        payload: LLMRouteProviderUpdateRequest,
+        _admin: dict = Depends(_require_admin),
+    ) -> dict:
+        rp = llm_store.update_route_provider(
+            rp_id=rp_id, priority=payload.priority, enabled=payload.enabled,
+            upstream_model=payload.upstream_model,
+        )
+        if not rp:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"route-provider not found: {rp_id}")
+        return {"ok": True, "route_provider": rp}
+
+    @app.delete("/admin/llm/route-providers/{rp_id}")
+    def admin_delete_route_provider(rp_id: str, _admin: dict = Depends(_require_admin)) -> dict:
+        if not llm_store.delete_route_provider(rp_id):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"route-provider not found: {rp_id}")
+        return {"ok": True, "message": f"route-provider deleted: {rp_id}"}
+
+    # ==================== Admin: provider health (circuit breaker) ====================
+
+    @app.get("/admin/llm/health")
+    def admin_list_provider_health(
+        group_id: str | None = Query(default=None),
+        _admin: dict = Depends(_require_admin),
+    ) -> dict:
+        return {"ok": True, "health": llm_store.list_provider_health(group_id)}
+
+    @app.post("/admin/llm/health/{provider_id}/reset")
+    def admin_reset_provider_health(provider_id: str, _admin: dict = Depends(_require_admin)) -> dict:
+        result = llm_store.reset_provider_health(provider_id)
+        if not result:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"no health record for provider: {provider_id}",
+            )
+        return {"ok": True, "health": result}
 
     # ==================== Admin: group api keys ====================
 
@@ -625,16 +700,51 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Body must be a JSON object")
         router = request.app.state.llm_router
         group_id = key.get("group_id", "")
-        openai_resolved = router.resolve_route(body.get("model", ""), group_id=group_id, required_protocol="openai")
+        alias = body.get("model", "")
+
+        route = llm_store.get_route_by_alias_in_group(alias, group_id=group_id) if group_id else llm_store.get_route_by_alias(alias)
+        if not route or not route.get("enabled"):
+            msg = f"model '{alias}' not found in group '{group_id}'"
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=msg)
+
+        mode = route.get("mode") or "direct"
+
+        if mode == "auto-select":
+            candidates = router.resolve_route_auto(alias, group_id=group_id, required_protocol="openai")
+            if not candidates:
+                msg = f"model '{alias}' has no healthy openai candidates in group '{group_id}'"
+                raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=msg)
+            if body.get("stream"):
+                return StreamingResponse(
+                    router.stream_auto_select(body, candidates=candidates,
+                                              api_key_id=key["key_id"], protocol="openai"),
+                    media_type="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no",
+                             "X-Keyway-Provider": candidates[0][1].get("provider_id", "")},
+                )
+            try:
+                result = await router.complete_auto_select(
+                    body, candidates=candidates, api_key_id=key["key_id"], protocol="openai",
+                )
+            except UpstreamError as exc:
+                logger.error("LLM auto-select all candidates failed: %s", exc)
+                status_code = exc.status_code if exc.status_code and exc.status_code < 500 else 502
+                raise HTTPException(status_code=status_code, detail=str(exc))
+            except ValueError as exc:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+            return JSONResponse(result)
+
+        # direct mode (default)
+        openai_resolved = router.resolve_route(alias, group_id=group_id, required_protocol="openai")
         if not openai_resolved:
-            any_route = llm_store.get_route_by_alias_in_group(body.get("model", ""), group_id=group_id)
+            any_route = llm_store.get_route_by_alias_in_group(alias, group_id=group_id)
             if any_route:
                 prov = llm_store.get_provider_with_key_in_group(any_route["provider_id"], group_id)
                 actual_proto = (prov or {}).get("protocol", "openai")
-                msg = (f"model '{body.get('model','')}' is bound to {actual_proto} provider "
+                msg = (f"model '{alias}' is bound to {actual_proto} provider "
                        f"in group '{group_id}', not openai")
             else:
-                msg = f"model '{body.get('model','')}' not found in group '{group_id}'"
+                msg = f"model '{alias}' not found in group '{group_id}'"
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=msg)
         if body.get("stream"):
             return StreamingResponse(
@@ -644,6 +754,9 @@ def create_app() -> FastAPI:
             )
         try:
             result = await router.complete(body, api_key_id=key["key_id"], protocol="openai", resolved=openai_resolved)
+        except UpstreamError as exc:
+            status_code = exc.status_code if exc.status_code and exc.status_code < 500 else 502
+            raise HTTPException(status_code=status_code, detail=str(exc))
         except ValueError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
         except Exception as exc:
@@ -680,6 +793,51 @@ def create_app() -> FastAPI:
         alias = req.get("model", "")
         router = request.app.state.llm_router
         group_id = key.get("group_id", "")
+
+        route = llm_store.get_route_by_alias_in_group(alias, group_id=group_id) if group_id else llm_store.get_route_by_alias(alias)
+        if not route or not route.get("enabled"):
+            msg = f"model '{alias}' not found in group '{group_id}'"
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"type": "not_found_error", "message": msg},
+            )
+
+        mode = route.get("mode") or "direct"
+
+        if mode == "auto-select":
+            candidates = router.resolve_route_auto(alias, group_id=group_id, required_protocol="anthropic")
+            if not candidates:
+                msg = f"model '{alias}' has no healthy anthropic candidates in group '{group_id}'"
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail={"type": "service_unavailable", "message": msg},
+                )
+            forward_body = dict(req)
+            if req.get("stream"):
+                return StreamingResponse(
+                    router.stream_auto_select(forward_body, candidates=candidates,
+                                              api_key_id=key["key_id"], protocol="anthropic"),
+                    media_type="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+                )
+            try:
+                anthropic_resp = await router.complete_auto_select(
+                    forward_body, candidates=candidates, api_key_id=key["key_id"], protocol="anthropic",
+                )
+            except UpstreamError as exc:
+                status_code = exc.status_code if exc.status_code and exc.status_code < 500 else 502
+                raise HTTPException(
+                    status_code=status_code,
+                    detail={"type": "upstream_error", "message": str(exc)},
+                )
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail={"type": "not_found_error", "message": str(exc)},
+                )
+            return JSONResponse(anthropic_resp)
+
+        # direct mode (default)
         resolved = router.resolve_route(alias, group_id=group_id, required_protocol="anthropic")
         if not resolved:
             any_route = llm_store.get_route_by_alias_in_group(alias, group_id=group_id)
@@ -707,6 +865,12 @@ def create_app() -> FastAPI:
         try:
             anthropic_resp = await router.complete(
                 forward_body, api_key_id=key["key_id"], protocol="anthropic", resolved=resolved,
+            )
+        except UpstreamError as exc:
+            status_code = exc.status_code if exc.status_code and exc.status_code < 500 else 502
+            raise HTTPException(
+                status_code=status_code,
+                detail={"type": "upstream_error", "message": str(exc)},
             )
         except ValueError as exc:
             raise HTTPException(
@@ -770,7 +934,7 @@ def create_app() -> FastAPI:
 
     @app.get("/health")
     def health() -> dict:
-        return {"ok": True, "version": "0.1.0"}
+        return {"ok": True, "version": "0.2.0"}
 
     # ==================== Web UI ====================
 

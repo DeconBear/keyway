@@ -1,13 +1,13 @@
-"""LLM Router data layer (grouped): 6 tables
-(llm_groups / llm_providers / model_routes / llm_api_keys /
-llm_tool_providers / llm_request_logs) + CRUD.
+"""LLM Router data layer (grouped): 8 tables
+(llm_groups / llm_providers / model_routes / route_providers /
+llm_api_keys / llm_tool_providers / llm_request_logs / provider_health) + CRUD.
 """
 
 from __future__ import annotations
 
 import sqlite3
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Lock
 from typing import Any
@@ -17,6 +17,9 @@ from . import crypto
 
 DEFAULT_GROUP_ID = "default"
 DEFAULT_GROUP_NAME = "Default Group"
+VALID_MODES = ("direct", "auto-select", "adapter", "fusion")
+CIRCUIT_FAIL_THRESHOLD = 3
+CIRCUIT_OPEN_SECONDS = 60
 
 
 def _utc_now_iso() -> str:
@@ -140,16 +143,44 @@ class LLMStore:
                     error           TEXT NOT NULL DEFAULT '',
                     created_at      TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS route_providers (
+                    rp_id          TEXT PRIMARY KEY,
+                    route_id       TEXT NOT NULL,
+                    provider_id    TEXT NOT NULL,
+                    upstream_model TEXT NOT NULL,
+                    priority       INTEGER NOT NULL DEFAULT 0,
+                    enabled        INTEGER NOT NULL DEFAULT 1,
+                    created_at     TEXT NOT NULL,
+                    FOREIGN KEY (route_id)    REFERENCES model_routes(route_id) ON DELETE CASCADE,
+                    FOREIGN KEY (provider_id) REFERENCES llm_providers(provider_id) ON DELETE CASCADE,
+                    UNIQUE (route_id, provider_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS provider_health (
+                    provider_id        TEXT PRIMARY KEY,
+                    group_id           TEXT NOT NULL DEFAULT 'default',
+                    consecutive_fails  INTEGER NOT NULL DEFAULT 0,
+                    last_fail_at       TEXT,
+                    last_success_at    TEXT,
+                    circuit_open       INTEGER NOT NULL DEFAULT 0,
+                    circuit_open_until TEXT,
+                    FOREIGN KEY (provider_id) REFERENCES llm_providers(provider_id) ON DELETE CASCADE
+                );
                 """
             )
         self._ensure_column("llm_providers", "group_id", "TEXT NOT NULL DEFAULT 'default'")
         self._ensure_column("llm_providers", "protocol", "TEXT NOT NULL DEFAULT 'openai'")
         self._ensure_column("model_routes", "group_id", "TEXT NOT NULL DEFAULT 'default'")
         self._ensure_column("model_routes", "upstream_path", "TEXT NOT NULL DEFAULT ''")
+        self._ensure_column("model_routes", "mode", "TEXT NOT NULL DEFAULT 'direct'")
+        self._ensure_column("model_routes", "adapter_config", "TEXT NOT NULL DEFAULT '{}'")
+        self._ensure_column("model_routes", "fusion_config", "TEXT NOT NULL DEFAULT '{}'")
         self._ensure_column("llm_api_keys", "group_id", "TEXT NOT NULL DEFAULT 'default'")
         self._ensure_column("llm_api_keys", "key_encrypted", "TEXT")
         self._ensure_column("llm_tool_providers", "group_id", "TEXT NOT NULL DEFAULT 'default'")
         self._ensure_column("llm_request_logs", "group_id", "TEXT NOT NULL DEFAULT 'default'")
+        self._ensure_column("llm_request_logs", "fusion_id", "TEXT")
         self._ensure_index("idx_llm_providers_group", "llm_providers(group_id)")
         self._ensure_index("idx_model_routes_group", "model_routes(group_id)")
         self._ensure_index("idx_model_routes_alias_group", "model_routes(alias, group_id)")
@@ -158,6 +189,8 @@ class LLMStore:
         self._ensure_index("idx_logs_group_created", "llm_request_logs(group_id, created_at DESC)")
         self._ensure_index("idx_logs_key", "llm_request_logs(api_key_id, created_at DESC)")
         self._ensure_index("idx_logs_created", "llm_request_logs(created_at DESC)")
+        self._ensure_index("idx_route_providers_route", "route_providers(route_id, priority)")
+        self._ensure_index("idx_provider_health_group", "provider_health(group_id)")
 
     def _ensure_column(self, table: str, column: str, decl: str) -> None:
         cols = {row["name"] for row in self._conn.execute(f"PRAGMA table_info({table})").fetchall()}
@@ -312,18 +345,41 @@ class LLMStore:
                      prov["enabled"], prov.get("note", ""), now, now),
                 )
 
+            route_id_map: dict[str, str] = {}
             for r_row in self._conn.execute(
                 "SELECT * FROM model_routes WHERE group_id = ?", (src_group_id,)
             ).fetchall():
                 r = dict(r_row)
                 new_pid = provider_id_map.get(r["provider_id"], r["provider_id"])
+                new_route_id = uuid.uuid4().hex
+                route_id_map[r["route_id"]] = new_route_id
                 self._conn.execute(
                     "INSERT INTO model_routes "
-                    "(route_id, group_id, alias, provider_id, upstream_model, upstream_path, enabled, note, created_at, updated_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (uuid.uuid4().hex, new_group_id, r["alias"], new_pid,
+                    "(route_id, group_id, alias, provider_id, upstream_model, upstream_path, "
+                    " enabled, note, created_at, updated_at, mode, adapter_config, fusion_config) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (new_route_id, new_group_id, r["alias"], new_pid,
                      r["upstream_model"], r.get("upstream_path", ""),
-                     r["enabled"], r.get("note", ""), now, now),
+                     r["enabled"], r.get("note", ""), now, now,
+                     r.get("mode", "direct"), r.get("adapter_config", "{}"),
+                     r.get("fusion_config", "{}")),
+                )
+
+            # Copy route_providers associations into the new group
+            for rp_row in self._conn.execute(
+                "SELECT rp.* FROM route_providers rp "
+                "JOIN model_routes r ON rp.route_id = r.route_id "
+                "WHERE r.group_id = ?",
+                (src_group_id,),
+            ).fetchall():
+                rp = dict(rp_row)
+                self._conn.execute(
+                    "INSERT INTO route_providers "
+                    "(rp_id, route_id, provider_id, upstream_model, priority, enabled, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (uuid.uuid4().hex, route_id_map.get(rp["route_id"], rp["route_id"]),
+                     provider_id_map.get(rp["provider_id"], rp["provider_id"]),
+                     rp["upstream_model"], rp["priority"], rp["enabled"], now),
                 )
 
             for t_row in self._conn.execute(
@@ -527,14 +583,16 @@ class LLMStore:
     # ---------- model_routes (flat + grouped) ----------
     def list_routes(self) -> list[dict[str, Any]]:
         rows = self._conn.execute(
-            "SELECT route_id, group_id, alias, provider_id, upstream_model, upstream_path, enabled, note, created_at, updated_at "
+            "SELECT route_id, group_id, alias, provider_id, upstream_model, upstream_path, "
+            "enabled, note, created_at, updated_at, mode, adapter_config, fusion_config "
             "FROM model_routes ORDER BY alias ASC"
         ).fetchall()
         return [dict(r) for r in rows]
 
     def list_routes_in_group(self, group_id: str) -> list[dict[str, Any]]:
         rows = self._conn.execute(
-            "SELECT route_id, group_id, alias, provider_id, upstream_model, upstream_path, enabled, note, created_at, updated_at "
+            "SELECT route_id, group_id, alias, provider_id, upstream_model, upstream_path, "
+            "enabled, note, created_at, updated_at, mode, adapter_config, fusion_config "
             "FROM model_routes WHERE group_id = ? ORDER BY alias ASC",
             (group_id,),
         ).fetchall()
@@ -572,7 +630,9 @@ class LLMStore:
         return self.get_route(route_id)  # type: ignore[return-value]
 
     def create_route_in_group(self, group_id: str, alias: str, provider_id: str,
-                               upstream_model: str, upstream_path: str = "", note: str = "") -> dict[str, Any]:
+                               upstream_model: str, upstream_path: str = "", note: str = "",
+                               mode: str = "direct", adapter_config: str = "{}",
+                               fusion_config: str = "{}") -> dict[str, Any]:
         if not self.get_group(group_id):
             raise ValueError(f"group not found: {group_id}")
         prov = self.get_provider_with_key(provider_id)
@@ -580,13 +640,17 @@ class LLMStore:
             raise ValueError(f"provider not found: {provider_id}")
         if prov.get("group_id") != group_id:
             raise ValueError("provider does not belong to this group")
+        if mode not in VALID_MODES:
+            raise ValueError(f"invalid mode: {mode} (must be one of {', '.join(VALID_MODES)})")
         now = _utc_now_iso()
         route_id = uuid.uuid4().hex
         with self._lock, self._conn:
             self._conn.execute(
-                "INSERT INTO model_routes (route_id, group_id, alias, provider_id, upstream_model, upstream_path, enabled, note, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?)",
-                (route_id, group_id, alias, provider_id, upstream_model, upstream_path, note, now, now),
+                "INSERT INTO model_routes (route_id, group_id, alias, provider_id, upstream_model, upstream_path, "
+                "enabled, note, created_at, updated_at, mode, adapter_config, fusion_config) "
+                "VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)",
+                (route_id, group_id, alias, provider_id, upstream_model, upstream_path, note, now, now,
+                 mode, adapter_config, fusion_config),
             )
         return self.get_route(route_id)  # type: ignore[return-value]
 
@@ -618,11 +682,16 @@ class LLMStore:
                               alias: str | None = None, provider_id: str | None = None,
                               upstream_model: str | None = None,
                               upstream_path: str | None = None,
-                              enabled: bool | None = None, note: str | None = None) -> dict[str, Any] | None:
+                              enabled: bool | None = None, note: str | None = None,
+                              mode: str | None = None,
+                              adapter_config: str | None = None,
+                              fusion_config: str | None = None) -> dict[str, Any] | None:
         if group_id_check is not None:
             existing = self.get_route(route_id)
             if not existing or existing.get("group_id") != group_id_check:
                 return None
+        if mode is not None and mode not in VALID_MODES:
+            raise ValueError(f"invalid mode: {mode} (must be one of {', '.join(VALID_MODES)})")
         sets: list[str] = []
         vals: list[Any] = []
         if alias is not None:
@@ -637,6 +706,12 @@ class LLMStore:
             sets.append("enabled = ?"); vals.append(1 if enabled else 0)
         if note is not None:
             sets.append("note = ?"); vals.append(note)
+        if mode is not None:
+            sets.append("mode = ?"); vals.append(mode)
+        if adapter_config is not None:
+            sets.append("adapter_config = ?"); vals.append(adapter_config)
+        if fusion_config is not None:
+            sets.append("fusion_config = ?"); vals.append(fusion_config)
         if not sets:
             return self.get_route(route_id)
         sets.append("updated_at = ?"); vals.append(_utc_now_iso())
@@ -895,15 +970,15 @@ class LLMStore:
     def log_request(self, *, api_key_id: str | None, route_alias: str, provider_id: str,
                     upstream_model: str, status_code: int | None, request_tokens: int | None,
                     response_tokens: int | None, latency_ms: int, error: str = "",
-                    group_id: str = "") -> None:
+                    group_id: str = "", fusion_id: str | None = None) -> None:
         log_id = uuid.uuid4().hex
         with self._lock, self._conn:
             self._conn.execute(
                 "INSERT INTO llm_request_logs (log_id, group_id, api_key_id, route_alias, provider_id, upstream_model, "
-                "status_code, request_tokens, response_tokens, latency_ms, error, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "status_code, request_tokens, response_tokens, latency_ms, error, created_at, fusion_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (log_id, group_id or "default", api_key_id, route_alias, provider_id, upstream_model,
-                 status_code, request_tokens, response_tokens, latency_ms, error, _utc_now_iso()),
+                 status_code, request_tokens, response_tokens, latency_ms, error, _utc_now_iso(), fusion_id),
             )
 
     def list_logs(self, api_key_id: str | None = None, group_id: str | None = None,
@@ -917,7 +992,7 @@ class LLMStore:
         where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
         rows = self._conn.execute(
             "SELECT log_id, group_id, api_key_id, route_alias, provider_id, upstream_model, status_code, "
-            "request_tokens, response_tokens, latency_ms, error, created_at "
+            "request_tokens, response_tokens, latency_ms, error, created_at, fusion_id "
             f"FROM llm_request_logs {where} ORDER BY created_at DESC LIMIT ?",
             (*vals, limit),
         ).fetchall()
@@ -934,6 +1009,168 @@ class LLMStore:
             (api_key_id,),
         ).fetchone()
         return dict(row) if row else {"total": 0, "ok": 0, "req_t": 0, "resp_t": 0, "avg_latency": 0}
+
+    # ---------- route_providers (multi-provider associations) ----------
+    def list_route_providers(self, route_id: str) -> list[dict[str, Any]]:
+        """List all provider associations for a route, sorted by priority."""
+        rows = self._conn.execute(
+            "SELECT rp_id, route_id, provider_id, upstream_model, priority, enabled, created_at "
+            "FROM route_providers WHERE route_id = ? ORDER BY priority ASC, created_at ASC",
+            (route_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def add_route_provider(self, route_id: str, provider_id: str,
+                           upstream_model: str, priority: int = 0,
+                           enabled: bool = True) -> dict[str, Any]:
+        route = self.get_route(route_id)
+        if not route:
+            raise ValueError(f"route not found: {route_id}")
+        prov = self.get_provider_with_key(provider_id)
+        if not prov:
+            raise ValueError(f"provider not found: {provider_id}")
+        if prov.get("group_id") != route.get("group_id"):
+            raise ValueError("provider does not belong to this route's group")
+        now = _utc_now_iso()
+        rp_id = uuid.uuid4().hex
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT INTO route_providers (rp_id, route_id, provider_id, upstream_model, priority, enabled, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (rp_id, route_id, provider_id, upstream_model, priority, 1 if enabled else 0, now),
+            )
+        return self.get_route_provider(rp_id)  # type: ignore[return-value]
+
+    def get_route_provider(self, rp_id: str) -> dict[str, Any] | None:
+        row = self._conn.execute(
+            "SELECT rp_id, route_id, provider_id, upstream_model, priority, enabled, created_at "
+            "FROM route_providers WHERE rp_id = ?",
+            (rp_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def update_route_provider(self, rp_id: str, *,
+                              priority: int | None = None,
+                              enabled: bool | None = None,
+                              upstream_model: str | None = None) -> dict[str, Any] | None:
+        existing = self.get_route_provider(rp_id)
+        if not existing:
+            return None
+        sets: list[str] = []
+        vals: list[Any] = []
+        if priority is not None:
+            sets.append("priority = ?"); vals.append(int(priority))
+        if enabled is not None:
+            sets.append("enabled = ?"); vals.append(1 if enabled else 0)
+        if upstream_model is not None:
+            sets.append("upstream_model = ?"); vals.append(upstream_model)
+        if not sets:
+            return self.get_route_provider(rp_id)
+        vals.append(rp_id)
+        with self._lock, self._conn:
+            self._conn.execute(
+                f"UPDATE route_providers SET {', '.join(sets)} WHERE rp_id = ?", tuple(vals)
+            )
+        return self.get_route_provider(rp_id)
+
+    def delete_route_provider(self, rp_id: str) -> bool:
+        with self._lock, self._conn:
+            cur = self._conn.execute("DELETE FROM route_providers WHERE rp_id = ?", (rp_id,))
+            return cur.rowcount > 0
+
+    # ---------- provider_health (circuit breaker) ----------
+    def _get_provider_health(self, provider_id: str) -> dict[str, Any] | None:
+        row = self._conn.execute(
+            "SELECT * FROM provider_health WHERE provider_id = ?",
+            (provider_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def record_provider_success(self, provider_id: str, group_id: str = "") -> None:
+        now = _utc_now_iso()
+        with self._lock, self._conn:
+            existing = self._get_provider_health(provider_id)
+            if existing:
+                self._conn.execute(
+                    "UPDATE provider_health SET consecutive_fails = 0, last_success_at = ?, "
+                    "circuit_open = 0, circuit_open_until = NULL WHERE provider_id = ?",
+                    (now, provider_id),
+                )
+            else:
+                self._conn.execute(
+                    "INSERT INTO provider_health (provider_id, group_id, consecutive_fails, "
+                    "last_success_at, circuit_open, circuit_open_until) VALUES (?, ?, 0, ?, 0, NULL)",
+                    (provider_id, group_id or "default", now),
+                )
+
+    def record_provider_failure(self, provider_id: str, group_id: str = "") -> None:
+        now_iso = _utc_now_iso()
+        now_dt = datetime.now(timezone.utc)
+        with self._lock, self._conn:
+            existing = self._get_provider_health(provider_id)
+            if existing:
+                fails = int(existing.get("consecutive_fails", 0)) + 1
+                if fails >= CIRCUIT_FAIL_THRESHOLD:
+                    open_until = (now_dt + timedelta(seconds=CIRCUIT_OPEN_SECONDS)).isoformat()
+                    self._conn.execute(
+                        "UPDATE provider_health SET consecutive_fails = ?, last_fail_at = ?, "
+                        "circuit_open = 1, circuit_open_until = ? WHERE provider_id = ?",
+                        (fails, now_iso, open_until, provider_id),
+                    )
+                else:
+                    self._conn.execute(
+                        "UPDATE provider_health SET consecutive_fails = ?, last_fail_at = ? "
+                        "WHERE provider_id = ?",
+                        (fails, now_iso, provider_id),
+                    )
+            else:
+                opens = 1 if 1 >= CIRCUIT_FAIL_THRESHOLD else 0
+                open_until = (now_dt + timedelta(seconds=CIRCUIT_OPEN_SECONDS)).isoformat() if opens else None
+                self._conn.execute(
+                    "INSERT INTO provider_health (provider_id, group_id, consecutive_fails, "
+                    "last_fail_at, circuit_open, circuit_open_until) VALUES (?, ?, ?, ?, ?, ?)",
+                    (provider_id, group_id or "default", 1, now_iso, opens, open_until),
+                )
+
+    def is_circuit_open(self, provider_id: str) -> bool:
+        row = self._get_provider_health(provider_id)
+        if not row:
+            return False
+        if not int(row.get("circuit_open", 0)):
+            return False
+        until = row.get("circuit_open_until")
+        if not until:
+            return True
+        try:
+            return datetime.now(timezone.utc) < datetime.fromisoformat(until)
+        except Exception:
+            return True
+
+    def reset_provider_health(self, provider_id: str) -> dict[str, Any] | None:
+        with self._lock, self._conn:
+            existing = self._get_provider_health(provider_id)
+            if not existing:
+                return None
+            self._conn.execute(
+                "UPDATE provider_health SET consecutive_fails = 0, circuit_open = 0, "
+                "circuit_open_until = NULL WHERE provider_id = ?",
+                (provider_id,),
+            )
+        return self._get_provider_health(provider_id)
+
+    def list_provider_health(self, group_id: str | None = None) -> list[dict[str, Any]]:
+        if group_id:
+            rows = self._conn.execute(
+                "SELECT ph.* FROM provider_health ph "
+                "JOIN llm_providers p ON ph.provider_id = p.provider_id "
+                "WHERE ph.group_id = ? ORDER BY ph.last_fail_at DESC NULLS LAST",
+                (group_id,),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM provider_health ORDER BY last_fail_at DESC NULLS LAST"
+            ).fetchall()
+        return [dict(r) for r in rows]
 
     # ---------- e2e helper ----------
     def list_enabled_routes_with_provider(self, group_id: str | None = None) -> list[dict[str, Any]]:
