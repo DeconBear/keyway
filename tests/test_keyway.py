@@ -946,3 +946,196 @@ def test_group_copy_preserves_mode_and_route_providers(keyway_env: Path) -> None
         copied_route_id = routes[0]["route_id"]
         r = c.get(f"/admin/llm/routes/{copied_route_id}/providers", headers=ADMIN_HEADERS)
         assert len(r.json()["route_providers"]) == 1
+
+
+# ---------- Phase 2: adapter mode ----------
+
+from keyway.modality import ModalityDetector
+from keyway.adapters import AdapterPipeline, ImageDescriber
+
+
+def test_modality_detector_text_only() -> None:
+    body = {"messages": [{"role": "user", "content": "hello"}]}
+    assert ModalityDetector.detect(body) == {"text"}
+    assert not ModalityDetector.has_image(body)
+
+
+def test_modality_detector_with_image_url() -> None:
+    body = {"messages": [{"role": "user", "content": [
+        {"type": "text", "text": "what is this?"},
+        {"type": "image_url", "image_url": {"url": "https://x/img.png"}},
+    ]}]}
+    modalities = ModalityDetector.detect(body)
+    assert "image" in modalities
+    assert ModalityDetector.has_image(body)
+
+
+def test_modality_detector_with_image_block() -> None:
+    body = {"messages": [{"role": "user", "content": [
+        {"type": "text", "text": "describe"},
+        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "abc"}},
+    ]}]}
+    assert "image" in ModalityDetector.detect(body)
+
+
+def test_adapter_pipeline_no_image_passthrough(keyway_env: Path) -> None:
+    s = LLMStore(keyway_env / "keyway.db", secret=SECRET)
+    s.create_provider_in_group("default", "p1", "P1", "https://x/v1", "k")
+    s.create_route_in_group("default", "vl", "p1", "vision-model")
+    router = LLMRouter(s)
+    pipeline = AdapterPipeline(router, {"vision_alias": "vl"})
+    import asyncio
+    body = {"messages": [{"role": "user", "content": "hello"}]}
+    out = asyncio.run(pipeline.adapt(body))
+    assert out == body  # unchanged — no image
+    s.close()
+
+
+def test_adapter_pipeline_replaces_image_with_description(
+    keyway_env: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    s = LLMStore(keyway_env / "keyway.db", secret=SECRET)
+    s.create_provider_in_group("default", "p1", "P1", "https://x/v1", "k")
+    s.create_route_in_group("default", "vl", "p1", "vision-model")
+    router = LLMRouter(s)
+
+    async def fake_complete(self, req_body, api_key_id=None, protocol=None, resolved=None):
+        return {
+            "id": "x", "object": "chat.completion",
+            "choices": [{"message": {"role": "assistant", "content": "a cat sitting on a desk"}}],
+        }
+    monkeypatch.setattr(LLMRouter, "complete", fake_complete)
+
+    pipeline = AdapterPipeline(router, {"vision_alias": "vl"})
+    import asyncio
+    body = {"messages": [{"role": "user", "content": [
+        {"type": "text", "text": "what is this?"},
+        {"type": "image_url", "image_url": {"url": "https://x/img.png"}},
+    ]}]}
+    out = asyncio.run(pipeline.adapt(body))
+    blocks = out["messages"][0]["content"]
+    assert len(blocks) == 2
+    assert blocks[0] == {"type": "text", "text": "what is this?"}
+    assert blocks[1]["type"] == "text"
+    assert "[Image: a cat sitting on a desk]" in blocks[1]["text"]
+    s.close()
+
+
+def test_adapter_pipeline_skip_image_fallback(
+    keyway_env: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    s = LLMStore(keyway_env / "keyway.db", secret=SECRET)
+    s.create_provider_in_group("default", "p1", "P1", "https://x/v1", "k")
+    s.create_route_in_group("default", "vl", "p1", "vision-model")
+    router = LLMRouter(s)
+
+    async def fake_complete(self, req_body, api_key_id=None, protocol=None, resolved=None):
+        raise UpstreamError("vision model failed", status_code=503)
+    monkeypatch.setattr(LLMRouter, "complete", fake_complete)
+
+    pipeline = AdapterPipeline(router, {"vision_alias": "vl", "fallback": "skip-image"})
+    import asyncio
+    body = {"messages": [{"role": "user", "content": [
+        {"type": "image_url", "image_url": {"url": "https://x/img.png"}},
+    ]}]}
+    out = asyncio.run(pipeline.adapt(body))
+    blocks = out["messages"][0]["content"]
+    assert blocks[0]["type"] == "text"
+    assert "<unavailable>" in blocks[0]["text"]
+    s.close()
+
+
+def test_adapter_pipeline_error_fallback_propagates(
+    keyway_env: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    s = LLMStore(keyway_env / "keyway.db", secret=SECRET)
+    s.create_provider_in_group("default", "p1", "P1", "https://x/v1", "k")
+    s.create_route_in_group("default", "vl", "p1", "vision-model")
+    router = LLMRouter(s)
+
+    async def fake_complete(self, req_body, api_key_id=None, protocol=None, resolved=None):
+        raise UpstreamError("vision model failed", status_code=503)
+    monkeypatch.setattr(LLMRouter, "complete", fake_complete)
+
+    pipeline = AdapterPipeline(router, {"vision_alias": "vl", "fallback": "error"})
+    import asyncio
+    body = {"messages": [{"role": "user", "content": [
+        {"type": "image_url", "image_url": {"url": "https://x/img.png"}},
+    ]}]}
+    with pytest.raises(UpstreamError):
+        asyncio.run(pipeline.adapt(body))
+    s.close()
+
+
+def test_v1_chat_completions_adapter_mode(
+    keyway_env: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    s = LLMStore(keyway_env / "keyway.db", secret=SECRET)
+    s.create_provider_in_group("default", "p1", "P1", "https://x/v1", "k")
+    s.create_provider_in_group("default", "pv", "Vision", "https://v/v1", "kv")
+    s.create_route_in_group("default", "vl", "pv", "vision-model")
+    import json as _json
+    s.create_route_in_group(
+        "default", "text-alias", "p1", "text-model", mode="adapter",
+        adapter_config=_json.dumps({"vision_alias": "vl", "fallback": "skip-image"}),
+    )
+    plaintext = generate_key()
+    s.create_key_in_group("default", hash_key(plaintext), key_prefix(plaintext), "test")
+    s.close()
+
+    # Mock the vision model's complete call (first call) and the text model's complete (second call)
+    call_count = {"n": 0}
+
+    async def fake_complete(self, req_body, api_key_id=None, protocol=None, resolved=None):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            # vision describe call
+            return {"choices": [{"message": {"role": "assistant", "content": "a red car"}}]}
+        # text model call
+        return {"choices": [{"message": {"role": "assistant", "content": "based on the image: a red car"}}]}
+    monkeypatch.setattr(LLMRouter, "complete", fake_complete)
+
+    with TestClient(create_app()) as c:
+        r = c.post(
+            "/v1/chat/completions",
+            headers={"Authorization": f"Bearer {plaintext}"},
+            json={"model": "text-alias", "messages": [{"role": "user", "content": [
+                {"type": "text", "text": "what is this?"},
+                {"type": "image_url", "image_url": {"url": "https://x/img.png"}},
+            ]}]},
+        )
+        assert r.status_code == 200, r.text
+        assert "a red car" in r.json()["choices"][0]["message"]["content"]
+        assert call_count["n"] == 2
+
+
+def test_v1_chat_completions_adapter_no_image_passthrough(
+    keyway_env: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    s = LLMStore(keyway_env / "keyway.db", secret=SECRET)
+    s.create_provider_in_group("default", "p1", "P1", "https://x/v1", "k")
+    import json as _json
+    s.create_route_in_group(
+        "default", "text-alias", "p1", "text-model", mode="adapter",
+        adapter_config=_json.dumps({"vision_alias": "vl"}),
+    )
+    plaintext = generate_key()
+    s.create_key_in_group("default", hash_key(plaintext), key_prefix(plaintext), "test")
+    s.close()
+
+    call_count = {"n": 0}
+
+    async def fake_complete(self, req_body, api_key_id=None, protocol=None, resolved=None):
+        call_count["n"] += 1
+        return {"choices": [{"message": {"role": "assistant", "content": "hi"}}]}
+    monkeypatch.setattr(LLMRouter, "complete", fake_complete)
+
+    with TestClient(create_app()) as c:
+        r = c.post(
+            "/v1/chat/completions",
+            headers={"Authorization": f"Bearer {plaintext}"},
+            json={"model": "text-alias", "messages": [{"role": "user", "content": "hello"}]},
+        )
+        assert r.status_code == 200, r.text
+        # No image → no vision call, just 1 text call
+        assert call_count["n"] == 1
