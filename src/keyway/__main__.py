@@ -10,11 +10,12 @@ from .config import load_settings
 def main() -> None:
     settings = load_settings()
     uvicorn.run(
-        "keyway.app:app",
+        "keyway.app:create_app",
         host=settings.host,
         port=settings.port,
         reload=False,
         log_level=settings.log_level,
+        factory=True,
     )
 
 

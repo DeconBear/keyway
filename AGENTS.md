@@ -3,9 +3,13 @@
 ## Push Policy (CRITICAL)
 
 - **Never push to remote unless the user explicitly says "push" or "推送".**
-- Local commits (`git commit`) are fine without permission.
+- **This is a hard rule.** Do not push under any other circumstance — not because
+  work is "done," not because you "think it should be pushed," not because you
+  are tagging a release. Only the user's explicit push/push command qualifies.
+- Local commits (`git commit`) and local tags (`git tag`) are fine without permission.
 - `git push` in any form requires explicit user instruction.
-- This includes: `git push`, `git push --tags`, `gh repo create --push`, `gh release create`, and any CI-triggering tag operations.
+- This includes: `git push`, `git push --tags`, `gh repo create --push`,
+  `gh release create`, and any CI-triggering tag operations.
 - If you are unsure whether the user authorized a push, do not push — ask first.
 
 ## Local-Only Files
