@@ -52,6 +52,8 @@ from .config import Settings, load_settings
 from .llm_keys import generate_key as _llm_generate_key, hash_key as _llm_hash_key, key_prefix as _llm_key_prefix
 from .llm_router import LLMRouter, UpstreamError
 from .llm_store import LLMStore
+from .adapters import AdapterPipeline
+from .modality import ModalityDetector
 from .models import (
     AdminLoginRequest,
     LLMGroupCopyRequest,
@@ -131,7 +133,7 @@ def create_app() -> FastAPI:
     llm_router = LLMRouter(llm_store)
     sessions = _SessionStore()
 
-    app = FastAPI(title="Keyway", version="0.2.0", docs_url=None, redoc_url=None, openapi_url=None)
+    app = FastAPI(title="Keyway", version="0.3.0", docs_url=None, redoc_url=None, openapi_url=None)
 
     app.add_middleware(
         CORSMiddleware,
@@ -734,6 +736,45 @@ def create_app() -> FastAPI:
                 raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
             return JSONResponse(result)
 
+        if mode == "adapter":
+            import json as _json
+            try:
+                adapter_cfg = _json.loads(route.get("adapter_config") or "{}")
+            except (ValueError, TypeError):
+                adapter_cfg = {}
+            if ModalityDetector.has_image(body):
+                pipeline = AdapterPipeline(router, adapter_cfg)
+                try:
+                    body = await pipeline.adapt(body, group_id=group_id)
+                except UpstreamError as exc:
+                    status_code = exc.status_code if exc.status_code and exc.status_code < 500 else 502
+                    raise HTTPException(status_code=status_code, detail=str(exc))
+                except Exception as exc:
+                    logger.error("Adapter pipeline error: %s", exc)
+                    raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"adapter error: {exc}")
+            # After adaptation, proceed as direct mode
+            openai_resolved = router.resolve_route(alias, group_id=group_id, required_protocol="openai")
+            if not openai_resolved:
+                msg = f"model '{alias}' has no healthy openai provider in group '{group_id}'"
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=msg)
+            if body.get("stream"):
+                return StreamingResponse(
+                    router.stream(body, api_key_id=key["key_id"], protocol="openai", resolved=openai_resolved),
+                    media_type="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+                )
+            try:
+                result = await router.complete(body, api_key_id=key["key_id"], protocol="openai", resolved=openai_resolved)
+            except UpstreamError as exc:
+                status_code = exc.status_code if exc.status_code and exc.status_code < 500 else 502
+                raise HTTPException(status_code=status_code, detail=str(exc))
+            except ValueError as exc:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+            except Exception as exc:
+                logger.error("LLM upstream error (adapter): %s", exc)
+                raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"upstream error: {exc}")
+            return JSONResponse(result)
+
         # direct mode (default)
         openai_resolved = router.resolve_route(alias, group_id=group_id, required_protocol="openai")
         if not openai_resolved:
@@ -837,6 +878,68 @@ def create_app() -> FastAPI:
                 )
             return JSONResponse(anthropic_resp)
 
+        if mode == "adapter":
+            import json as _json
+            try:
+                adapter_cfg = _json.loads(route.get("adapter_config") or "{}")
+            except (ValueError, TypeError):
+                adapter_cfg = {}
+            if ModalityDetector.has_image(req):
+                pipeline = AdapterPipeline(router, adapter_cfg)
+                try:
+                    req = await pipeline.adapt(req, group_id=group_id)
+                except UpstreamError as exc:
+                    status_code = exc.status_code if exc.status_code and exc.status_code < 500 else 502
+                    raise HTTPException(
+                        status_code=status_code,
+                        detail={"type": "upstream_error", "message": str(exc)},
+                    )
+                except Exception as exc:
+                    logger.error("Adapter pipeline error: %s", exc)
+                    raise HTTPException(
+                        status_code=status.HTTP_502_BAD_GATEWAY,
+                        detail={"type": "adapter_error", "message": str(exc)},
+                    )
+            # After adaptation, proceed as direct mode (anthropic)
+            resolved = router.resolve_route(alias, group_id=group_id, required_protocol="anthropic")
+            if not resolved:
+                msg = f"model '{alias}' has no healthy anthropic provider in group '{group_id}'"
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail={"type": "not_found_error", "message": msg},
+                )
+            route, provider = resolved
+            forward_body = dict(req)
+            forward_body["model"] = route["upstream_model"]
+            if req.get("stream"):
+                return StreamingResponse(
+                    router.stream(forward_body, api_key_id=key["key_id"], protocol="anthropic", resolved=resolved),
+                    media_type="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+                )
+            try:
+                anthropic_resp = await router.complete(
+                    forward_body, api_key_id=key["key_id"], protocol="anthropic", resolved=resolved,
+                )
+            except UpstreamError as exc:
+                status_code = exc.status_code if exc.status_code and exc.status_code < 500 else 502
+                raise HTTPException(
+                    status_code=status_code,
+                    detail={"type": "upstream_error", "message": str(exc)},
+                )
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail={"type": "not_found_error", "message": str(exc)},
+                )
+            except Exception as exc:
+                logger.error("Anthropic LLM upstream error (adapter): %s", exc)
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail={"type": "upstream_error", "message": f"upstream error: {exc}"},
+                )
+            return JSONResponse(anthropic_resp)
+
         # direct mode (default)
         resolved = router.resolve_route(alias, group_id=group_id, required_protocol="anthropic")
         if not resolved:
@@ -934,7 +1037,7 @@ def create_app() -> FastAPI:
 
     @app.get("/health")
     def health() -> dict:
-        return {"ok": True, "version": "0.2.0"}
+        return {"ok": True, "version": "0.3.0"}
 
     # ==================== Web UI ====================
 
