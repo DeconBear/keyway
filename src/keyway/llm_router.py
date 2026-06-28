@@ -628,6 +628,7 @@ class LLMRouter:
         latency_ms: int,
         error: str,
         api_key_id: str | None,
+        fusion_id: str | None = None,
     ) -> None:
         try:
             self.store.log_request(
@@ -641,6 +642,7 @@ class LLMRouter:
                 response_tokens=response_tokens,
                 latency_ms=latency_ms,
                 error=error or "",
+                fusion_id=fusion_id,
             )
         except Exception:
             pass

@@ -18,3 +18,5 @@ logs/
 .venv/
 venv/
 docs/
+AGENTS.md
+CLAUDE.md

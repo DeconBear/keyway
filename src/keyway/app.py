@@ -54,6 +54,7 @@ from .llm_router import LLMRouter, UpstreamError
 from .llm_store import LLMStore
 from .adapters import AdapterPipeline
 from .modality import ModalityDetector
+from .fusion import FusionOrchestrator
 from .models import (
     AdminLoginRequest,
     LLMGroupCopyRequest,
@@ -133,7 +134,7 @@ def create_app() -> FastAPI:
     llm_router = LLMRouter(llm_store)
     sessions = _SessionStore()
 
-    app = FastAPI(title="Keyway", version="0.3.0", docs_url=None, redoc_url=None, openapi_url=None)
+    app = FastAPI(title="Keyway", version="0.1.3", docs_url=None, redoc_url=None, openapi_url=None)
 
     app.add_middleware(
         CORSMiddleware,
@@ -775,6 +776,47 @@ def create_app() -> FastAPI:
                 raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"upstream error: {exc}")
             return JSONResponse(result)
 
+        if mode == "fusion":
+            import json as _json
+            try:
+                fusion_cfg = _json.loads(route.get("fusion_config") or "{}")
+            except (ValueError, TypeError):
+                fusion_cfg = {}
+            judge_alias = fusion_cfg.get("judge_alias", "")
+            if not judge_alias:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="fusion mode requires 'judge_alias' in fusion_config",
+                )
+            strategy = fusion_cfg.get("strategy", "compare_and_synthesize")
+            min_candidates = int(fusion_cfg.get("min_candidates", 2))
+            timeout_seconds = int(fusion_cfg.get("timeout_seconds", 30))
+
+            candidates = router.resolve_route_auto(alias, group_id=group_id, required_protocol="openai")
+            if len(candidates) < min_candidates:
+                msg = (f"fusion requires at least {min_candidates} candidates, "
+                       f"got {len(candidates)} in group '{group_id}'")
+                raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=msg)
+
+            orchestrator = FusionOrchestrator(router)
+            try:
+                fusion_result = await orchestrator.fuse(
+                    body, candidates, judge_alias=judge_alias, strategy=strategy,
+                    group_id=group_id, api_key_id=key["key_id"],
+                    min_candidates=min_candidates, timeout_seconds=timeout_seconds,
+                )
+            except UpstreamError as exc:
+                status_code = exc.status_code if exc.status_code and exc.status_code < 500 else 502
+                raise HTTPException(status_code=status_code, detail=str(exc))
+            except Exception as exc:
+                logger.error("Fusion error: %s", exc)
+                raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"fusion error: {exc}")
+            return JSONResponse(
+                fusion_result["result"],
+                headers={"X-Keyway-Fusion": ",".join(fusion_result["members"]),
+                         "X-Keyway-Fusion-Id": fusion_result["fusion_id"]},
+            )
+
         # direct mode (default)
         openai_resolved = router.resolve_route(alias, group_id=group_id, required_protocol="openai")
         if not openai_resolved:
@@ -940,6 +982,57 @@ def create_app() -> FastAPI:
                 )
             return JSONResponse(anthropic_resp)
 
+        if mode == "fusion":
+            import json as _json
+            try:
+                fusion_cfg = _json.loads(route.get("fusion_config") or "{}")
+            except (ValueError, TypeError):
+                fusion_cfg = {}
+            judge_alias = fusion_cfg.get("judge_alias", "")
+            if not judge_alias:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={"type": "invalid_request_error",
+                            "message": "fusion mode requires 'judge_alias' in fusion_config"},
+                )
+            strategy = fusion_cfg.get("strategy", "compare_and_synthesize")
+            min_candidates = int(fusion_cfg.get("min_candidates", 2))
+            timeout_seconds = int(fusion_cfg.get("timeout_seconds", 30))
+
+            candidates = router.resolve_route_auto(alias, group_id=group_id, required_protocol="anthropic")
+            if len(candidates) < min_candidates:
+                msg = (f"fusion requires at least {min_candidates} candidates, "
+                       f"got {len(candidates)} in group '{group_id}'")
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail={"type": "service_unavailable", "message": msg},
+                )
+
+            orchestrator = FusionOrchestrator(router)
+            try:
+                fusion_result = await orchestrator.fuse(
+                    req, candidates, judge_alias=judge_alias, strategy=strategy,
+                    group_id=group_id, api_key_id=key["key_id"],
+                    min_candidates=min_candidates, timeout_seconds=timeout_seconds,
+                )
+            except UpstreamError as exc:
+                status_code = exc.status_code if exc.status_code and exc.status_code < 500 else 502
+                raise HTTPException(
+                    status_code=status_code,
+                    detail={"type": "upstream_error", "message": str(exc)},
+                )
+            except Exception as exc:
+                logger.error("Fusion error: %s", exc)
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail={"type": "fusion_error", "message": str(exc)},
+                )
+            return JSONResponse(
+                fusion_result["result"],
+                headers={"X-Keyway-Fusion": ",".join(fusion_result["members"]),
+                         "X-Keyway-Fusion-Id": fusion_result["fusion_id"]},
+            )
+
         # direct mode (default)
         resolved = router.resolve_route(alias, group_id=group_id, required_protocol="anthropic")
         if not resolved:
@@ -1037,7 +1130,7 @@ def create_app() -> FastAPI:
 
     @app.get("/health")
     def health() -> dict:
-        return {"ok": True, "version": "0.3.0"}
+        return {"ok": True, "version": "0.1.3"}
 
     # ==================== Web UI ====================
 
