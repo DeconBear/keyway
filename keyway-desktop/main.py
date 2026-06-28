@@ -12,6 +12,9 @@ Usage:
 
 from __future__ import annotations
 
+import ctypes
+import os
+import sys
 import threading
 import time
 
@@ -22,6 +25,27 @@ from server import ServerManager
 HOST = "127.0.0.1"
 PORT = 9233
 URL = f"http://{HOST}:{PORT}"
+
+# App identity — used for the Windows taskbar icon and window class
+APP_ID = "keyway.desktop.v1"
+_ICON_PATH = os.path.join(os.path.dirname(__file__), "keyway.ico")
+
+
+def _set_app_icon(icon_path: str | None = None) -> None:
+    """Set the Windows taskbar icon for the process."""
+    if sys.platform != "win32":
+        return
+    path = icon_path or _ICON_PATH
+    if not os.path.exists(path):
+        return
+    try:
+        # Set the process icon (affects taskbar)
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_ID)
+        # Load and set window class icon — this requires a window handle,
+        # which pywebview manages internally. The PyInstaller-built exe will
+        # carry the icon natively via its embedded resource.
+    except Exception:
+        pass
 
 
 class KeywayDesktop:
@@ -58,6 +82,7 @@ class KeywayDesktop:
         self._stop_server()
 
     def run(self) -> None:
+        _set_app_icon()
         print("[desktop] starting Keyway server...")
         ok = self._start_server()
         if not ok:
