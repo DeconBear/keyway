@@ -45,11 +45,17 @@ class ServerManager:
         env.setdefault("KEYWAY_HOST", self.host)
         env.setdefault("KEYWAY_PORT", str(self.port))
         if not env.get("KEYWAY_SECRET"):
-            # Auto-generate a dev secret so the server can start
             env["KEYWAY_SECRET"] = secrets.token_urlsafe(48)
         if not env.get("KEYWAY_ADMIN_TOKEN"):
             env["KEYWAY_ADMIN_TOKEN"] = secrets.token_urlsafe(24)
+        self._admin_token = env["KEYWAY_ADMIN_TOKEN"]
         return env
+
+    @property
+    def admin_token(self) -> str:
+        if not hasattr(self, '_admin_token'):
+            self._admin_token = self._env().get("KEYWAY_ADMIN_TOKEN", "")
+        return self._admin_token
 
     def start(self) -> bool:
         """Start keyway server subprocess. Returns True if started successfully."""
