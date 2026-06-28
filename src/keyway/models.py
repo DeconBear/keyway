@@ -45,6 +45,9 @@ class LLMRouteCreateRequest(BaseModel):
     provider_id: str = Field(..., min_length=1, max_length=64)
     upstream_model: str = Field(..., min_length=1, max_length=256)
     upstream_path: str = Field(default="", max_length=256)
+    mode: str = Field(default="direct", max_length=16)
+    adapter_config: str = Field(default="{}", max_length=4096)
+    fusion_config: str = Field(default="{}", max_length=4096)
     note: str = Field(default="", max_length=512)
 
 
@@ -53,8 +56,24 @@ class LLMRouteUpdateRequest(BaseModel):
     provider_id: str | None = Field(default=None, max_length=64)
     upstream_model: str | None = Field(default=None, max_length=256)
     upstream_path: str | None = Field(default=None, max_length=256)
+    mode: str | None = Field(default=None, max_length=16)
+    adapter_config: str | None = Field(default=None, max_length=4096)
+    fusion_config: str | None = Field(default=None, max_length=4096)
     enabled: bool | None = None
     note: str | None = Field(default=None, max_length=512)
+
+
+class LLMRouteProviderCreateRequest(BaseModel):
+    provider_id: str = Field(..., min_length=1, max_length=64)
+    upstream_model: str = Field(..., min_length=1, max_length=256)
+    priority: int = Field(default=0)
+    enabled: bool = Field(default=True)
+
+
+class LLMRouteProviderUpdateRequest(BaseModel):
+    priority: int | None = None
+    enabled: bool | None = None
+    upstream_model: str | None = Field(default=None, max_length=256)
 
 
 class LLMKeyCreateRequest(BaseModel):

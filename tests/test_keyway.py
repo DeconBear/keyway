@@ -29,7 +29,7 @@ if str(SRC_ROOT) not in __import__("sys").path:
     __import__("sys").path.insert(0, str(SRC_ROOT))
 
 from keyway.llm_keys import generate_key, hash_key, key_prefix
-from keyway.llm_router import LLMRouter
+from keyway.llm_router import LLMRouter, UpstreamError
 from keyway.llm_store import LLMStore
 from keyway.app import create_app
 
@@ -529,3 +529,420 @@ def test_admin_group_copy(keyway_env: Path) -> None:
         r = c.post("/admin/llm/groups/default/copy", json={"new_name": "Copied Group", "new_group_id": "grp-copy"}, headers=ADMIN_HEADERS)
         assert r.status_code == 200, r.text
         assert r.json()["group"]["group_id"] == "grp-copy"
+
+
+# ---------- Multi-mode: route mode field ----------
+
+def test_route_mode_defaults_to_direct(keyway_env: Path) -> None:
+    with TestClient(create_app()) as c:
+        c.post("/admin/llm/groups/default/providers", json={
+            "provider_id": "p1", "name": "P", "base_url": "https://x/v1", "api_key": "k",
+        }, headers=ADMIN_HEADERS)
+        r = c.post("/admin/llm/groups/default/routes", json={
+            "alias": "a1", "provider_id": "p1", "upstream_model": "m",
+        }, headers=ADMIN_HEADERS)
+        assert r.status_code == 200
+        assert r.json()["route"]["mode"] == "direct"
+
+
+def test_route_mode_create_and_update(keyway_env: Path) -> None:
+    with TestClient(create_app()) as c:
+        c.post("/admin/llm/groups/default/providers", json={
+            "provider_id": "p1", "name": "P", "base_url": "https://x/v1", "api_key": "k",
+        }, headers=ADMIN_HEADERS)
+        r = c.post("/admin/llm/groups/default/routes", json={
+            "alias": "a1", "provider_id": "p1", "upstream_model": "m", "mode": "auto-select",
+        }, headers=ADMIN_HEADERS)
+        assert r.status_code == 200, r.text
+        assert r.json()["route"]["mode"] == "auto-select"
+        route_id = r.json()["route"]["route_id"]
+        r = c.patch(f"/admin/llm/routes/{route_id}", json={"mode": "direct"}, headers=ADMIN_HEADERS)
+        assert r.json()["route"]["mode"] == "direct"
+
+
+def test_route_mode_invalid_rejected(keyway_env: Path) -> None:
+    with TestClient(create_app()) as c:
+        c.post("/admin/llm/groups/default/providers", json={
+            "provider_id": "p1", "name": "P", "base_url": "https://x/v1", "api_key": "k",
+        }, headers=ADMIN_HEADERS)
+        r = c.post("/admin/llm/groups/default/routes", json={
+            "alias": "a1", "provider_id": "p1", "upstream_model": "m", "mode": "bogus",
+        }, headers=ADMIN_HEADERS)
+        assert r.status_code == 400
+
+
+# ---------- Multi-mode: route_providers admin CRUD ----------
+
+def test_route_providers_admin_crud(keyway_env: Path) -> None:
+    with TestClient(create_app()) as c:
+        for pid in ("p1", "p2"):
+            c.post("/admin/llm/groups/default/providers", json={
+                "provider_id": pid, "name": pid, "base_url": f"https://{pid}/v1", "api_key": "k",
+            }, headers=ADMIN_HEADERS)
+        r = c.post("/admin/llm/groups/default/routes", json={
+            "alias": "smart", "provider_id": "p1", "upstream_model": "m1", "mode": "auto-select",
+        }, headers=ADMIN_HEADERS)
+        route_id = r.json()["route"]["route_id"]
+
+        r = c.get(f"/admin/llm/routes/{route_id}/providers", headers=ADMIN_HEADERS)
+        assert r.status_code == 200
+        assert r.json()["route_providers"] == []
+
+        r = c.post(f"/admin/llm/routes/{route_id}/providers", json={
+            "provider_id": "p2", "upstream_model": "m2", "priority": 1,
+        }, headers=ADMIN_HEADERS)
+        assert r.status_code == 200, r.text
+        rp_id = r.json()["route_provider"]["rp_id"]
+        assert r.json()["route_provider"]["priority"] == 1
+
+        r = c.get(f"/admin/llm/routes/{route_id}/providers", headers=ADMIN_HEADERS)
+        assert len(r.json()["route_providers"]) == 1
+
+        r = c.patch(f"/admin/llm/route-providers/{rp_id}", json={"priority": 5}, headers=ADMIN_HEADERS)
+        assert r.json()["route_provider"]["priority"] == 5
+
+        r = c.delete(f"/admin/llm/route-providers/{rp_id}", headers=ADMIN_HEADERS)
+        assert r.status_code == 200
+        r = c.get(f"/admin/llm/routes/{route_id}/providers", headers=ADMIN_HEADERS)
+        assert len(r.json()["route_providers"]) == 0
+
+
+def test_route_provider_duplicate_rejected(keyway_env: Path) -> None:
+    with TestClient(create_app()) as c:
+        for pid in ("p1", "p2"):
+            c.post("/admin/llm/groups/default/providers", json={
+                "provider_id": pid, "name": pid, "base_url": f"https://{pid}/v1", "api_key": "k",
+            }, headers=ADMIN_HEADERS)
+        r = c.post("/admin/llm/groups/default/routes", json={
+            "alias": "smart", "provider_id": "p1", "upstream_model": "m", "mode": "auto-select",
+        }, headers=ADMIN_HEADERS)
+        route_id = r.json()["route"]["route_id"]
+        r = c.post(f"/admin/llm/routes/{route_id}/providers", json={
+            "provider_id": "p2", "upstream_model": "m",
+        }, headers=ADMIN_HEADERS)
+        assert r.status_code == 200
+        r = c.post(f"/admin/llm/routes/{route_id}/providers", json={
+            "provider_id": "p2", "upstream_model": "m",
+        }, headers=ADMIN_HEADERS)
+        assert r.status_code == 409
+
+
+# ---------- Multi-mode: circuit breaker (provider_health) ----------
+
+def test_circuit_breaker_opens_after_threshold(keyway_env: Path) -> None:
+    s = LLMStore(keyway_env / "keyway.db", secret=SECRET)
+    s.create_provider_in_group("default", "p1", "P1", "https://x/v1", "k")
+    assert not s.is_circuit_open("p1")
+    s.record_provider_failure("p1")
+    s.record_provider_failure("p1")
+    assert not s.is_circuit_open("p1")
+    s.record_provider_failure("p1")
+    assert s.is_circuit_open("p1")
+    s.close()
+
+
+def test_circuit_breaker_resets_on_success(keyway_env: Path) -> None:
+    s = LLMStore(keyway_env / "keyway.db", secret=SECRET)
+    s.create_provider_in_group("default", "p1", "P1", "https://x/v1", "k")
+    for _ in range(3):
+        s.record_provider_failure("p1")
+    assert s.is_circuit_open("p1")
+    s.record_provider_success("p1")
+    assert not s.is_circuit_open("p1")
+    s.close()
+
+
+def test_reset_provider_health(keyway_env: Path) -> None:
+    s = LLMStore(keyway_env / "keyway.db", secret=SECRET)
+    s.create_provider_in_group("default", "p1", "P1", "https://x/v1", "k")
+    for _ in range(3):
+        s.record_provider_failure("p1")
+    assert s.is_circuit_open("p1")
+    result = s.reset_provider_health("p1")
+    assert result is not None
+    assert not s.is_circuit_open("p1")
+    s.close()
+
+
+def test_admin_health_endpoints(keyway_env: Path) -> None:
+    s = LLMStore(keyway_env / "keyway.db", secret=SECRET)
+    s.create_provider_in_group("default", "p1", "P1", "https://x/v1", "k")
+    for _ in range(3):
+        s.record_provider_failure("p1")
+    s.close()
+    with TestClient(create_app()) as c:
+        r = c.get("/admin/llm/health", headers=ADMIN_HEADERS)
+        assert r.status_code == 200
+        assert len(r.json()["health"]) == 1
+        assert r.json()["health"][0]["circuit_open"] == 1
+
+        r = c.get("/admin/llm/health?group_id=default", headers=ADMIN_HEADERS)
+        assert r.status_code == 200
+        assert len(r.json()["health"]) == 1
+
+        r = c.post("/admin/llm/health/p1/reset", headers=ADMIN_HEADERS)
+        assert r.status_code == 200
+        assert r.json()["health"]["circuit_open"] == 0
+
+        r = c.post("/admin/llm/health/nonexistent/reset", headers=ADMIN_HEADERS)
+        assert r.status_code == 404
+
+
+# ---------- Multi-mode: resolve_route_auto ----------
+
+def test_resolve_route_auto_filters_circuit(keyway_env: Path) -> None:
+    s = LLMStore(keyway_env / "keyway.db", secret=SECRET)
+    s.create_provider_in_group("default", "p1", "P1", "https://x/v1", "k")
+    s.create_provider_in_group("default", "p2", "P2", "https://y/v1", "k")
+    r = s.create_route_in_group("default", "smart", "p1", "m1", mode="auto-select")
+    s.add_route_provider(r["route_id"], "p1", "m1", priority=0)
+    s.add_route_provider(r["route_id"], "p2", "m2", priority=1)
+    router = LLMRouter(s)
+    candidates = router.resolve_route_auto("smart", group_id="default", required_protocol="openai")
+    assert len(candidates) == 2
+    assert candidates[0][1]["provider_id"] == "p1"  # priority 0
+    assert candidates[1][1]["provider_id"] == "p2"  # priority 1
+    # Open circuit on p1
+    for _ in range(3):
+        s.record_provider_failure("p1")
+    candidates = router.resolve_route_auto("smart", group_id="default", required_protocol="openai")
+    assert len(candidates) == 1
+    assert candidates[0][1]["provider_id"] == "p2"
+    s.close()
+
+
+def test_resolve_route_auto_fallback_to_primary(keyway_env: Path) -> None:
+    s = LLMStore(keyway_env / "keyway.db", secret=SECRET)
+    s.create_provider_in_group("default", "p1", "P1", "https://x/v1", "k")
+    s.create_route_in_group("default", "smart", "p1", "m1", mode="auto-select")
+    # No route_providers rows → falls back to primary binding
+    router = LLMRouter(s)
+    candidates = router.resolve_route_auto("smart", group_id="default", required_protocol="openai")
+    assert len(candidates) == 1
+    assert candidates[0][1]["provider_id"] == "p1"
+    s.close()
+
+
+def test_resolve_route_auto_protocol_filter(keyway_env: Path) -> None:
+    s = LLMStore(keyway_env / "keyway.db", secret=SECRET)
+    s.create_provider_in_group("default", "p1", "P1", "https://x/v1", "k", protocol="openai")
+    s.create_provider_in_group("default", "p2", "P2", "https://y/v1", "k", protocol="anthropic")
+    r = s.create_route_in_group("default", "smart", "p1", "m1", mode="auto-select")
+    s.add_route_provider(r["route_id"], "p1", "m1", priority=0)
+    s.add_route_provider(r["route_id"], "p2", "m2", priority=1)
+    router = LLMRouter(s)
+    candidates = router.resolve_route_auto("smart", group_id="default", required_protocol="openai")
+    assert len(candidates) == 1
+    assert candidates[0][1]["provider_id"] == "p1"
+    s.close()
+
+
+# ---------- Multi-mode: complete_auto_select failover ----------
+
+def test_complete_auto_select_failover(keyway_env: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    s = LLMStore(keyway_env / "keyway.db", secret=SECRET)
+    s.create_provider_in_group("default", "p1", "P1", "https://x/v1", "k")
+    s.create_provider_in_group("default", "p2", "P2", "https://y/v1", "k")
+    r = s.create_route_in_group("default", "smart", "p1", "m1", mode="auto-select")
+    s.add_route_provider(r["route_id"], "p1", "m1", priority=0)
+    s.add_route_provider(r["route_id"], "p2", "m2", priority=1)
+    router = LLMRouter(s)
+    candidates = router.resolve_route_auto("smart", group_id="default", required_protocol="openai")
+
+    call_providers: list[str] = []
+
+    async def fake_call_non_stream(self, provider, model, body):
+        call_providers.append(provider["provider_id"])
+        if provider["provider_id"] == "p1":
+            raise UpstreamError("upstream 503: service unavailable", status_code=503)
+        return {
+            "id": "x", "object": "chat.completion",
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok from p2"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        }
+    monkeypatch.setattr(LLMRouter, "_call_upstream_non_stream", fake_call_non_stream)
+
+    import asyncio
+    result = asyncio.run(router.complete_auto_select(
+        {"model": "smart", "messages": []}, candidates=candidates, protocol="openai",
+    ))
+    assert result["choices"][0]["message"]["content"] == "ok from p2"
+    assert call_providers == ["p1", "p2"]
+    # p1 should have a failure recorded
+    assert s.is_circuit_open("p1") is False  # only 1 failure
+    s.close()
+
+
+def test_complete_auto_select_non_retryable_4xx(keyway_env: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    s = LLMStore(keyway_env / "keyway.db", secret=SECRET)
+    s.create_provider_in_group("default", "p1", "P1", "https://x/v1", "k")
+    s.create_provider_in_group("default", "p2", "P2", "https://y/v1", "k")
+    r = s.create_route_in_group("default", "smart", "p1", "m1", mode="auto-select")
+    s.add_route_provider(r["route_id"], "p1", "m1", priority=0)
+    s.add_route_provider(r["route_id"], "p2", "m2", priority=1)
+    router = LLMRouter(s)
+    candidates = router.resolve_route_auto("smart", group_id="default", required_protocol="openai")
+
+    call_providers: list[str] = []
+
+    async def fake_call_non_stream(self, provider, model, body):
+        call_providers.append(provider["provider_id"])
+        raise UpstreamError("upstream 400: bad request", status_code=400)
+    monkeypatch.setattr(LLMRouter, "_call_upstream_non_stream", fake_call_non_stream)
+
+    import asyncio
+    with pytest.raises(UpstreamError) as exc_info:
+        asyncio.run(router.complete_auto_select(
+            {"model": "smart", "messages": []}, candidates=candidates, protocol="openai",
+        ))
+    assert exc_info.value.status_code == 400
+    # Should only try p1 (first candidate), not failover on 4xx
+    assert call_providers == ["p1"]
+    s.close()
+
+
+def test_complete_auto_select_all_fail(keyway_env: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    s = LLMStore(keyway_env / "keyway.db", secret=SECRET)
+    s.create_provider_in_group("default", "p1", "P1", "https://x/v1", "k")
+    s.create_provider_in_group("default", "p2", "P2", "https://y/v1", "k")
+    r = s.create_route_in_group("default", "smart", "p1", "m1", mode="auto-select")
+    s.add_route_provider(r["route_id"], "p1", "m1", priority=0)
+    s.add_route_provider(r["route_id"], "p2", "m2", priority=1)
+    router = LLMRouter(s)
+    candidates = router.resolve_route_auto("smart", group_id="default", required_protocol="openai")
+
+    async def fake_call_non_stream(self, provider, model, body):
+        raise UpstreamError("upstream 503: service unavailable", status_code=503)
+    monkeypatch.setattr(LLMRouter, "_call_upstream_non_stream", fake_call_non_stream)
+
+    import asyncio
+    with pytest.raises(UpstreamError) as exc_info:
+        asyncio.run(router.complete_auto_select(
+            {"model": "smart", "messages": []}, candidates=candidates, protocol="openai",
+        ))
+    assert exc_info.value.status_code == 503
+    s.close()
+
+
+# ---------- Multi-mode: auto-select endpoint dispatch ----------
+
+def test_v1_chat_completions_auto_select(keyway_env: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    s = LLMStore(keyway_env / "keyway.db", secret=SECRET)
+    s.create_provider_in_group("default", "p1", "P1", "https://x/v1", "k")
+    s.create_provider_in_group("default", "p2", "P2", "https://y/v1", "k")
+    r = s.create_route_in_group("default", "smart", "p1", "m1", mode="auto-select")
+    s.add_route_provider(r["route_id"], "p2", "m2", priority=1)
+    plaintext = generate_key()
+    s.create_key_in_group("default", hash_key(plaintext), key_prefix(plaintext), "test")
+    s.close()
+
+    async def fake_complete_auto_select(self, body, *, candidates, api_key_id=None, protocol=None):
+        return {"id": "x", "choices": [{"message": {"role": "assistant", "content": "auto-ok"}}]}
+    monkeypatch.setattr(LLMRouter, "complete_auto_select", fake_complete_auto_select)
+
+    with TestClient(create_app()) as c:
+        r = c.post(
+            "/v1/chat/completions",
+            headers={"Authorization": f"Bearer {plaintext}"},
+            json={"model": "smart", "messages": [{"role": "user", "content": "hi"}]},
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["choices"][0]["message"]["content"] == "auto-ok"
+
+
+def test_v1_chat_completions_auto_select_streaming(keyway_env: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    s = LLMStore(keyway_env / "keyway.db", secret=SECRET)
+    s.create_provider_in_group("default", "p1", "P1", "https://x/v1", "k")
+    r = s.create_route_in_group("default", "smart", "p1", "m1", mode="auto-select")
+    plaintext = generate_key()
+    s.create_key_in_group("default", hash_key(plaintext), key_prefix(plaintext), "test")
+    s.close()
+
+    async def fake_stream_auto_select(self, body, *, candidates, api_key_id=None, protocol=None):
+        for chunk in (b"data: a\n\n", b"data: b\n\n", b"data: [DONE]\n\n"):
+            yield chunk
+    monkeypatch.setattr(LLMRouter, "stream_auto_select", fake_stream_auto_select)
+
+    with TestClient(create_app()) as c:
+        r = c.post(
+            "/v1/chat/completions",
+            headers={"Authorization": f"Bearer {plaintext}"},
+            json={"model": "smart", "stream": True, "messages": []},
+        )
+        assert r.status_code == 200
+        assert r.headers["content-type"].startswith("text/event-stream")
+        body = b"".join(r.iter_bytes()).decode()
+        assert "data: a" in body and "data: b" in body and "[DONE]" in body
+
+
+def test_v1_chat_completions_auto_select_no_candidates(keyway_env: Path) -> None:
+    s = LLMStore(keyway_env / "keyway.db", secret=SECRET)
+    s.create_provider_in_group("default", "p1", "P1", "https://x/v1", "k")
+    s.create_route_in_group("default", "smart", "p1", "m1", mode="auto-select")
+    # Open circuit on p1 so no candidates are available
+    for _ in range(3):
+        s.record_provider_failure("p1")
+    plaintext = generate_key()
+    s.create_key_in_group("default", hash_key(plaintext), key_prefix(plaintext), "test")
+    s.close()
+    with TestClient(create_app()) as c:
+        r = c.post(
+            "/v1/chat/completions",
+            headers={"Authorization": f"Bearer {plaintext}"},
+            json={"model": "smart", "messages": [{"role": "user", "content": "hi"}]},
+        )
+        assert r.status_code == 503
+
+
+def test_v1_chat_completions_auto_select_4xx_propagates(keyway_env: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    s = LLMStore(keyway_env / "keyway.db", secret=SECRET)
+    s.create_provider_in_group("default", "p1", "P1", "https://x/v1", "k")
+    s.create_route_in_group("default", "smart", "p1", "m1", mode="auto-select")
+    plaintext = generate_key()
+    s.create_key_in_group("default", hash_key(plaintext), key_prefix(plaintext), "test")
+    s.close()
+
+    async def fake_complete_auto_select(self, body, *, candidates, api_key_id=None, protocol=None):
+        raise UpstreamError("upstream 400: bad request", status_code=400)
+    monkeypatch.setattr(LLMRouter, "complete_auto_select", fake_complete_auto_select)
+
+    with TestClient(create_app()) as c:
+        r = c.post(
+            "/v1/chat/completions",
+            headers={"Authorization": f"Bearer {plaintext}"},
+            json={"model": "smart", "messages": [{"role": "user", "content": "hi"}]},
+        )
+        assert r.status_code == 400
+
+
+# ---------- Multi-mode: group copy preserves mode + route_providers ----------
+
+def test_group_copy_preserves_mode_and_route_providers(keyway_env: Path) -> None:
+    with TestClient(create_app()) as c:
+        for pid in ("p1", "p2"):
+            c.post("/admin/llm/groups/default/providers", json={
+                "provider_id": pid, "name": pid, "base_url": f"https://{pid}/v1", "api_key": "k",
+            }, headers=ADMIN_HEADERS)
+        r = c.post("/admin/llm/groups/default/routes", json={
+            "alias": "smart", "provider_id": "p1", "upstream_model": "m1", "mode": "auto-select",
+        }, headers=ADMIN_HEADERS)
+        route_id = r.json()["route"]["route_id"]
+        c.post(f"/admin/llm/routes/{route_id}/providers", json={
+            "provider_id": "p2", "upstream_model": "m2", "priority": 1,
+        }, headers=ADMIN_HEADERS)
+
+        r = c.post("/admin/llm/groups/default/copy", json={
+            "new_name": "Copy", "new_group_id": "grp2",
+        }, headers=ADMIN_HEADERS)
+        assert r.status_code == 200, r.text
+
+        # Verify copied route has auto-select mode
+        r = c.get("/admin/llm/groups/grp2/routes", headers=ADMIN_HEADERS)
+        routes = r.json()["routes"]
+        assert len(routes) == 1
+        assert routes[0]["mode"] == "auto-select"
+
+        # Verify route_providers were copied
+        copied_route_id = routes[0]["route_id"]
+        r = c.get(f"/admin/llm/routes/{copied_route_id}/providers", headers=ADMIN_HEADERS)
+        assert len(r.json()["route_providers"]) == 1
