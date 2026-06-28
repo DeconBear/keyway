@@ -1139,3 +1139,283 @@ def test_v1_chat_completions_adapter_no_image_passthrough(
         assert r.status_code == 200, r.text
         # No image → no vision call, just 1 text call
         assert call_count["n"] == 1
+
+
+# ---------- Phase 3: fusion mode ----------
+
+from keyway.fusion import FusionOrchestrator
+
+
+def test_fusion_orchestrator_compare_and_synthesize(
+    keyway_env: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    s = LLMStore(keyway_env / "keyway.db", secret=SECRET)
+    s.create_provider_in_group("default", "p1", "P1", "https://x/v1", "k")
+    s.create_provider_in_group("default", "p2", "P2", "https://y/v1", "k")
+    s.create_provider_in_group("default", "pj", "Judge", "https://j/v1", "kj")
+    s.create_route_in_group("default", "judge", "pj", "judge-model")
+    r = s.create_route_in_group("default", "fusion-alias", "p1", "m1", mode="fusion")
+    s.add_route_provider(r["route_id"], "p1", "m1", priority=0)
+    s.add_route_provider(r["route_id"], "p2", "m2", priority=1)
+    router = LLMRouter(s)
+    candidates = router.resolve_route_auto("fusion-alias", group_id="default", required_protocol="openai")
+
+    call_models: list[str] = []
+
+    async def fake_complete(self, req_body, api_key_id=None, protocol=None, resolved=None):
+        model = req_body.get("model", "")
+        call_models.append(model)
+        if model == "judge":
+            return {"choices": [{"message": {"role": "assistant", "content": "synthesized answer"}}]}
+        # candidate responses
+        pid = resolved[1]["provider_id"] if resolved else model
+        return {"choices": [{"message": {"role": "assistant", "content": f"answer from {pid}"}}]}
+    monkeypatch.setattr(LLMRouter, "complete", fake_complete)
+
+    orch = FusionOrchestrator(router)
+    import asyncio
+    result = asyncio.run(orch.fuse(
+        {"model": "fusion-alias", "messages": [{"role": "user", "content": "what is 2+2?"}]},
+        candidates, judge_alias="judge", strategy="compare_and_synthesize", group_id="default",
+    ))
+    assert result["result"]["choices"][0]["message"]["content"] == "synthesized answer"
+    assert set(result["members"]) == {"p1", "p2"}
+    assert len(result["fusion_id"]) > 0
+    s.close()
+
+
+def test_fusion_orchestrator_majority_vote(
+    keyway_env: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    s = LLMStore(keyway_env / "keyway.db", secret=SECRET)
+    s.create_provider_in_group("default", "p1", "P1", "https://x/v1", "k")
+    s.create_provider_in_group("default", "p2", "P2", "https://y/v1", "k")
+    s.create_provider_in_group("default", "pj", "Judge", "https://j/v1", "kj")
+    s.create_route_in_group("default", "judge", "pj", "judge-model")
+    r = s.create_route_in_group("default", "fusion-alias", "p1", "m1", mode="fusion")
+    s.add_route_provider(r["route_id"], "p1", "m1", priority=0)
+    s.add_route_provider(r["route_id"], "p2", "m2", priority=1)
+    router = LLMRouter(s)
+    candidates = router.resolve_route_auto("fusion-alias", group_id="default", required_protocol="openai")
+
+    async def fake_complete(self, req_body, api_key_id=None, protocol=None, resolved=None):
+        model = req_body.get("model", "")
+        if model == "judge":
+            return {"choices": [{"message": {"role": "assistant", "content": "4"}}]}
+        return {"choices": [{"message": {"role": "assistant", "content": "4"}}]}
+    monkeypatch.setattr(LLMRouter, "complete", fake_complete)
+
+    orch = FusionOrchestrator(router)
+    import asyncio
+    result = asyncio.run(orch.fuse(
+        {"model": "fusion-alias", "messages": [{"role": "user", "content": "what is 2+2?"}]},
+        candidates, judge_alias="judge", strategy="majority_vote", group_id="default",
+    ))
+    assert result["result"]["choices"][0]["message"]["content"] == "4"
+    s.close()
+
+
+def test_fusion_orchestrator_insufficient_candidates(
+    keyway_env: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    s = LLMStore(keyway_env / "keyway.db", secret=SECRET)
+    s.create_provider_in_group("default", "p1", "P1", "https://x/v1", "k")
+    s.create_route_in_group("default", "judge", "p1", "judge-model")
+    r = s.create_route_in_group("default", "fusion-alias", "p1", "m1", mode="fusion")
+    s.add_route_provider(r["route_id"], "p1", "m1", priority=0)
+    router = LLMRouter(s)
+    candidates = router.resolve_route_auto("fusion-alias", group_id="default", required_protocol="openai")
+
+    orch = FusionOrchestrator(router)
+    import asyncio
+    with pytest.raises(UpstreamError):
+        asyncio.run(orch.fuse(
+            {"model": "fusion-alias", "messages": []},
+            candidates, judge_alias="judge", min_candidates=2, group_id="default",
+        ))
+    s.close()
+
+
+def test_fusion_orchestrator_all_candidates_fail(
+    keyway_env: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    s = LLMStore(keyway_env / "keyway.db", secret=SECRET)
+    s.create_provider_in_group("default", "p1", "P1", "https://x/v1", "k")
+    s.create_provider_in_group("default", "p2", "P2", "https://y/v1", "k")
+    s.create_provider_in_group("default", "pj", "Judge", "https://j/v1", "kj")
+    s.create_route_in_group("default", "judge", "pj", "judge-model")
+    r = s.create_route_in_group("default", "fusion-alias", "p1", "m1", mode="fusion")
+    s.add_route_provider(r["route_id"], "p1", "m1", priority=0)
+    s.add_route_provider(r["route_id"], "p2", "m2", priority=1)
+    router = LLMRouter(s)
+    candidates = router.resolve_route_auto("fusion-alias", group_id="default", required_protocol="openai")
+
+    async def fake_complete(self, req_body, api_key_id=None, protocol=None, resolved=None):
+        raise UpstreamError("upstream 503", status_code=503)
+    monkeypatch.setattr(LLMRouter, "complete", fake_complete)
+
+    orch = FusionOrchestrator(router)
+    import asyncio
+    with pytest.raises(UpstreamError) as exc_info:
+        asyncio.run(orch.fuse(
+            {"model": "fusion-alias", "messages": []},
+            candidates, judge_alias="judge", group_id="default",
+        ))
+    assert "all fusion candidates failed" in str(exc_info.value) or exc_info.value.status_code == 503
+    s.close()
+
+
+def test_fusion_orchestrator_partial_failure(
+    keyway_env: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    s = LLMStore(keyway_env / "keyway.db", secret=SECRET)
+    s.create_provider_in_group("default", "p1", "P1", "https://x/v1", "k")
+    s.create_provider_in_group("default", "p2", "P2", "https://y/v1", "k")
+    s.create_provider_in_group("default", "pj", "Judge", "https://j/v1", "kj")
+    s.create_route_in_group("default", "judge", "pj", "judge-model")
+    r = s.create_route_in_group("default", "fusion-alias", "p1", "m1", mode="fusion")
+    s.add_route_provider(r["route_id"], "p1", "m1", priority=0)
+    s.add_route_provider(r["route_id"], "p2", "m2", priority=1)
+    router = LLMRouter(s)
+    candidates = router.resolve_route_auto("fusion-alias", group_id="default", required_protocol="openai")
+
+    async def fake_complete(self, req_body, api_key_id=None, protocol=None, resolved=None):
+        model = req_body.get("model", "")
+        if model == "judge":
+            return {"choices": [{"message": {"role": "assistant", "content": "final from judge"}}]}
+        pid = resolved[1]["provider_id"] if resolved else ""
+        if pid == "p1":
+            raise UpstreamError("p1 down", status_code=503)
+        return {"choices": [{"message": {"role": "assistant", "content": "answer from p2"}}]}
+    monkeypatch.setattr(LLMRouter, "complete", fake_complete)
+
+    orch = FusionOrchestrator(router)
+    import asyncio
+    result = asyncio.run(orch.fuse(
+        {"model": "fusion-alias", "messages": [{"role": "user", "content": "hi"}]},
+        candidates, judge_alias="judge", group_id="default",
+    ))
+    # Only p2 succeeded, judge still runs
+    assert result["members"] == ["p2"]
+    assert result["result"]["choices"][0]["message"]["content"] == "final from judge"
+    s.close()
+
+
+def test_v1_chat_completions_fusion_mode(
+    keyway_env: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    s = LLMStore(keyway_env / "keyway.db", secret=SECRET)
+    s.create_provider_in_group("default", "p1", "P1", "https://x/v1", "k")
+    s.create_provider_in_group("default", "p2", "P2", "https://y/v1", "k")
+    s.create_provider_in_group("default", "pj", "Judge", "https://j/v1", "kj")
+    s.create_route_in_group("default", "judge", "pj", "judge-model")
+    import json as _json
+    r = s.create_route_in_group(
+        "default", "fusion-alias", "p1", "m1", mode="fusion",
+        fusion_config=_json.dumps({"judge_alias": "judge", "strategy": "compare_and_synthesize"}),
+    )
+    s.add_route_provider(r["route_id"], "p1", "m1", priority=0)
+    s.add_route_provider(r["route_id"], "p2", "m2", priority=1)
+    plaintext = generate_key()
+    s.create_key_in_group("default", hash_key(plaintext), key_prefix(plaintext), "test")
+    s.close()
+
+    async def fake_complete(self, req_body, api_key_id=None, protocol=None, resolved=None):
+        model = req_body.get("model", "")
+        if model == "judge":
+            return {"choices": [{"message": {"role": "assistant", "content": "best answer"}}]}
+        return {"choices": [{"message": {"role": "assistant", "content": "candidate answer"}}]}
+    monkeypatch.setattr(LLMRouter, "complete", fake_complete)
+
+    with TestClient(create_app()) as c:
+        r = c.post(
+            "/v1/chat/completions",
+            headers={"Authorization": f"Bearer {plaintext}"},
+            json={"model": "fusion-alias", "messages": [{"role": "user", "content": "what is the meaning of life?"}]},
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["choices"][0]["message"]["content"] == "best answer"
+        assert "p1" in r.headers.get("X-Keyway-Fusion", "")
+        assert "p2" in r.headers.get("X-Keyway-Fusion", "")
+        assert len(r.headers.get("X-Keyway-Fusion-Id", "")) > 0
+
+
+def test_v1_chat_completions_fusion_missing_judge_alias(keyway_env: Path) -> None:
+    s = LLMStore(keyway_env / "keyway.db", secret=SECRET)
+    s.create_provider_in_group("default", "p1", "P1", "https://x/v1", "k")
+    s.create_provider_in_group("default", "p2", "P2", "https://y/v1", "k")
+    import json as _json
+    r = s.create_route_in_group(
+        "default", "fusion-alias", "p1", "m1", mode="fusion",
+        fusion_config=_json.dumps({"strategy": "compare_and_synthesize"}),
+    )
+    s.add_route_provider(r["route_id"], "p1", "m1", priority=0)
+    s.add_route_provider(r["route_id"], "p2", "m2", priority=1)
+    plaintext = generate_key()
+    s.create_key_in_group("default", hash_key(plaintext), key_prefix(plaintext), "test")
+    s.close()
+    with TestClient(create_app()) as c:
+        r = c.post(
+            "/v1/chat/completions",
+            headers={"Authorization": f"Bearer {plaintext}"},
+            json={"model": "fusion-alias", "messages": [{"role": "user", "content": "hi"}]},
+        )
+        assert r.status_code == 400
+
+
+def test_v1_chat_completions_fusion_insufficient_candidates(keyway_env: Path) -> None:
+    s = LLMStore(keyway_env / "keyway.db", secret=SECRET)
+    s.create_provider_in_group("default", "p1", "P1", "https://x/v1", "k")
+    s.create_provider_in_group("default", "pj", "Judge", "https://j/v1", "kj")
+    s.create_route_in_group("default", "judge", "pj", "judge-model")
+    import json as _json
+    r = s.create_route_in_group(
+        "default", "fusion-alias", "p1", "m1", mode="fusion",
+        fusion_config=_json.dumps({"judge_alias": "judge"}),
+    )
+    s.add_route_provider(r["route_id"], "p1", "m1", priority=0)
+    # Only 1 candidate but min_candidates defaults to 2
+    plaintext = generate_key()
+    s.create_key_in_group("default", hash_key(plaintext), key_prefix(plaintext), "test")
+    s.close()
+    with TestClient(create_app()) as c:
+        r = c.post(
+            "/v1/chat/completions",
+            headers={"Authorization": f"Bearer {plaintext}"},
+            json={"model": "fusion-alias", "messages": [{"role": "user", "content": "hi"}]},
+        )
+        assert r.status_code == 503
+
+
+def test_fusion_id_logged_in_request_logs(
+    keyway_env: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    s = LLMStore(keyway_env / "keyway.db", secret=SECRET)
+    s.create_provider_in_group("default", "p1", "P1", "https://x/v1", "k")
+    s.create_provider_in_group("default", "p2", "P2", "https://y/v1", "k")
+    s.create_provider_in_group("default", "pj", "Judge", "https://j/v1", "kj")
+    s.create_route_in_group("default", "judge", "pj", "judge-model")
+    r = s.create_route_in_group("default", "fusion-alias", "p1", "m1", mode="fusion")
+    s.add_route_provider(r["route_id"], "p1", "m1", priority=0)
+    s.add_route_provider(r["route_id"], "p2", "m2", priority=1)
+    router = LLMRouter(s)
+    candidates = router.resolve_route_auto("fusion-alias", group_id="default", required_protocol="openai")
+
+    async def fake_complete(self, req_body, api_key_id=None, protocol=None, resolved=None):
+        model = req_body.get("model", "")
+        if model == "judge":
+            return {"choices": [{"message": {"role": "assistant", "content": "ok"}}]}
+        return {"choices": [{"message": {"role": "assistant", "content": "candidate"}}]}
+    monkeypatch.setattr(LLMRouter, "complete", fake_complete)
+
+    orch = FusionOrchestrator(router)
+    import asyncio
+    result = asyncio.run(orch.fuse(
+        {"model": "fusion-alias", "messages": [{"role": "user", "content": "hi"}]},
+        candidates, judge_alias="judge", group_id="default",
+    ))
+    fusion_id = result["fusion_id"]
+    logs = s.list_logs()
+    fusion_logs = [l for l in logs if l.get("fusion_id") == fusion_id]
+    assert len(fusion_logs) >= 1  # at least the judge log
+    s.close()

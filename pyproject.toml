@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "keyway-router"
-version = "0.3.0"
+version = "0.1.3"
 description = "A lightweight self-hosted LLM routing gateway with OpenAI & Anthropic dual-protocol support"
 readme = "README.md"
 license = { text = "MIT" }
