@@ -44,7 +44,7 @@ from fastapi import (
     status,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import crypto
@@ -226,6 +226,28 @@ def create_app() -> FastAPI:
             secure=request.url.scheme == "https",
         )
         return {"ok": True}
+
+    @app.get("/admin/desktop-login")
+    def admin_desktop_login(
+        token: str = Query(...), request: Request = None, response: Response = None,
+    ) -> Response:
+        """Desktop auto-login: validate token, set session cookie, redirect to admin.html."""
+        from fastapi.responses import RedirectResponse
+        if not request or not response:
+            raise HTTPException(status_code=500, detail="Internal error")
+        if token != request.app.state.admin_token:
+            return RedirectResponse("/")
+        session_token = request.app.state.sessions.create()
+        response = RedirectResponse("/admin.html")
+        response.set_cookie(
+            key="keyway_admin_session",
+            value=session_token,
+            max_age=SESSION_TTL_SECONDS,
+            httponly=True,
+            samesite="lax",
+            secure=request.url.scheme == "https",
+        )
+        return response
 
     @app.get("/admin/session")
     def admin_session(_admin: dict = Depends(_require_admin)) -> dict:

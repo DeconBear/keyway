@@ -24,6 +24,7 @@ from server import ServerManager
 
 HOST = "127.0.0.1"
 PORT = 9233
+URL = f"http://{HOST}:{PORT}"
 
 # App identity — used for the Windows taskbar icon and window class
 APP_ID = "keyway.desktop.v1"
@@ -80,30 +81,6 @@ class KeywayDesktop:
         self._polling = False
         self._stop_server()
 
-    def _auto_login_html(self) -> str:
-        """Return a tiny HTML page that auto-POSTs to /admin/login then
-        redirects to /admin.html. Uses full URLs so the webview cookie
-        jar picks up the session for the correct origin."""
-        token = self.server.admin_token
-        base = f"http://{HOST}:{PORT}"
-        return f"""<!DOCTYPE html><html><body style="background:#0d1117;color:#c9d1d9;
-font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;
-height:100vh;margin:0;font-size:1.1rem;">Starting Keyway…
-<script>
-var B = '{base}';
-fetch(B + '/admin/login', {{
-    method: 'POST',
-    headers: {{'Content-Type': 'application/json'}},
-    credentials: 'include',
-    body: JSON.stringify({{token: '{token}'}})
-}}).then(function(r) {{
-    if (r.ok) {{ window.location.replace(B + '/admin.html'); }}
-    else {{ window.location.replace(B + '/'); }}
-}}).catch(function() {{
-    setTimeout(function() {{ window.location.replace(B + '/admin.html'); }}, 2000);
-}});
-</script></body></html>"""
-
     def run(self) -> None:
         _set_app_icon()
         print("[desktop] starting Keyway server...")
@@ -111,10 +88,12 @@ fetch(B + '/admin/login', {{
         if not ok:
             print("[desktop] WARNING: server failed to start. Admin panel may show 502.", flush=True)
 
-        # Build the window and load the auto-login splash page
+        token = self.server.admin_token
+        login_url = f"http://{HOST}:{PORT}/admin/desktop-login?token={token}"
+
         self._window = webview.create_window(
             "Keyway Admin — Starting...",
-            html=self._auto_login_html(),
+            login_url,
             width=1100,
             height=750,
             min_size=(800, 600),
