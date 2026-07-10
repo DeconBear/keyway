@@ -1,110 +1,101 @@
-"""Keyway server subprocess manager.
+"""Keyway server manager — in-process mode for standalone desktop.
 
-Starts and stops ``python -m keyway`` as a child process, monitors its
-stdout for the ready signal, and provides health check capability.
-
-Config is inherited from the parent environment (``KEYWAY_SECRET``,
-``KEYWAY_ADMIN_TOKEN``, ``KEYWAY_PORT``, ``KEYWAY_HOST``, etc.).
-If ``KEYWAY_SECRET`` is not set, a dev secret is generated automatically.
+Starts the Keyway server in a daemon thread inside the same Python
+process. No subprocess needed — works when packaged via PyInstaller.
 """
 
 from __future__ import annotations
 
 import os
 import secrets
-import subprocess
-import sys
+import threading
 import time
-from pathlib import Path
+import urllib.request
+from typing import Any
 
-READY_MARKER = "running on"
-START_TIMEOUT = 30  # seconds
-
-
-def _keyway_root() -> Path:
-    return Path(__file__).resolve().parents[1] / "src"
+READY_TIMEOUT = 30  # seconds
 
 
 class ServerManager:
-    """Manages the Keyway server subprocess lifecycle."""
+    """Manages the Keyway server lifecycle in a daemon thread."""
 
     def __init__(self, host: str = "127.0.0.1", port: int = 9233) -> None:
         self.host = host
         self.port = port
         self.url = f"http://{host}:{port}"
-        self._proc: subprocess.Popen | None = None
+        self._thread: threading.Thread | None = None
+        self._server: Any = None
 
     @property
     def running(self) -> bool:
-        if self._proc is None:
-            return False
-        return self._proc.poll() is None
+        return self._thread is not None and self._thread.is_alive()
+
+    @property
+    def admin_token(self) -> str:
+        env = self._env()
+        return env.get("KEYWAY_ADMIN_TOKEN", "")
 
     def _env(self) -> dict[str, str]:
         env = os.environ.copy()
-        env.setdefault("KEYWAY_HOST", self.host)
+        # Desktop always binds loopback — never expose auth-bypass remotely.
+        env["KEYWAY_HOST"] = self.host if self.host in {"127.0.0.1", "localhost", "::1"} else "127.0.0.1"
+        self.host = env["KEYWAY_HOST"]
+        self.url = f"http://{self.host}:{self.port}"
         env.setdefault("KEYWAY_PORT", str(self.port))
         if not env.get("KEYWAY_SECRET"):
             env["KEYWAY_SECRET"] = secrets.token_urlsafe(48)
         if not env.get("KEYWAY_ADMIN_TOKEN"):
             env["KEYWAY_ADMIN_TOKEN"] = secrets.token_urlsafe(24)
-        self._admin_token = env["KEYWAY_ADMIN_TOKEN"]
+        env.setdefault("KEYWAY_DESKTOP_MODE", "1")
         return env
 
-    @property
-    def admin_token(self) -> str:
-        if not hasattr(self, '_admin_token'):
-            self._admin_token = self._env().get("KEYWAY_ADMIN_TOKEN", "")
-        return self._admin_token
-
     def start(self) -> bool:
-        """Start keyway server subprocess. Returns True if started successfully."""
         if self.running:
             return True
 
-        root = _keyway_root()
-        creation_flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+        env = self._env()
+        for k, v in env.items():
+            if k.startswith("KEYWAY_"):
+                os.environ[k] = v
 
-        try:
-            self._proc = subprocess.Popen(
-                [sys.executable, "-m", "keyway"],
-                cwd=str(root.parent),
-                env=self._env(),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                creationflags=creation_flags,
-            )
-        except Exception:
-            return False
+        self._thread = threading.Thread(target=self._run_server, daemon=True)
+        self._thread.start()
 
-        # Wait for ready signal
-        start = time.time()
-        while time.time() - start < START_TIMEOUT:
-            if self._proc.poll() is not None:
-                return False
-            line = self._proc.stdout.readline()  # type: ignore[union-attr]
-            if READY_MARKER in line:
+        deadline = time.time() + READY_TIMEOUT
+        while time.time() < deadline:
+            if self.is_healthy():
                 return True
-            if not line:
-                time.sleep(0.1)
-        return self.running
+            if not self._thread.is_alive():
+                return False
+            time.sleep(0.3)
+        return self.running and self.is_healthy()
+
+    def _run_server(self) -> None:
+        import uvicorn
+
+        config = uvicorn.Config(
+            "keyway.app:create_app",
+            host=self.host,
+            port=self.port,
+            log_level="warning",
+            factory=True,
+        )
+        self._server = uvicorn.Server(config)
+        self._server.run()
 
     def stop(self) -> None:
-        if self._proc and self.running:
-            self._proc.terminate()
-            try:
-                self._proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self._proc.kill()
-                self._proc.wait()
-        self._proc = None
+        server = self._server
+        if server is not None:
+            server.should_exit = True
+        thread = self._thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=5)
+        self._server = None
+        self._thread = None
 
     def is_healthy(self) -> bool:
-        """Quick health check via HTTP GET /health."""
         if not self.running:
             return False
-        import urllib.request
         try:
             with urllib.request.urlopen(f"{self.url}/health", timeout=3) as resp:
                 return resp.status == 200

@@ -4,7 +4,7 @@ WORKDIR /app
 
 COPY pyproject.toml .
 COPY src/ src/
-COPY web/ web/
+# Static admin UI ships as package data under src/keyway/web/
 
 RUN pip install --no-cache-dir .
 

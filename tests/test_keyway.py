@@ -16,6 +16,7 @@ Covers:
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -277,6 +278,8 @@ def test_router_complete_with_tool_loop(keyway_env: Path, monkeypatch: pytest.Mo
 
     from keyway import llm_router as llm_router_mod
     async def fake_execute_tool(name, args, providers):
+        assert isinstance(providers, dict)
+        assert providers["tavily"]["api_key"] == "tvly-test"
         return json.dumps({"results": [{"title": "t", "url": "u", "content": "c"}]})
     monkeypatch.setattr(llm_router_mod, "execute_tool", fake_execute_tool)
 
@@ -286,6 +289,82 @@ def test_router_complete_with_tool_loop(keyway_env: Path, monkeypatch: pytest.Mo
     assert out["choices"][0]["message"]["content"] == "done"
     logs = s.list_logs()
     assert len(logs) == 2
+    s.close()
+
+
+def test_get_tool_definitions_respects_enabled_in_group(keyway_env: Path) -> None:
+    s = LLMStore(keyway_env / "keyway.db", secret=SECRET)
+    s.create_provider_in_group("default", "p1", "P1", "https://x/v1", "k")
+    router = LLMRouter(s)
+    assert router.get_tool_definitions("default") == []
+    s.create_tool_provider_in_group("default", "tavily", "Tavily", "tvly-key")
+    defs = router.get_tool_definitions("default")
+    assert len(defs) == 1
+    assert defs[0]["function"]["name"] == "tavily_search"
+    s.update_tool_provider("tavily", enabled=False)
+    assert router.get_tool_definitions("default") == []
+    s.close()
+
+
+def test_tool_providers_map_includes_decrypted_key(keyway_env: Path) -> None:
+    s = LLMStore(keyway_env / "keyway.db", secret=SECRET)
+    s.create_tool_provider_in_group("default", "tavily", "Tavily", "tvly-secret")
+    router = LLMRouter(s)
+    mapping = router._tool_providers_map("default")
+    assert "tavily" in mapping
+    assert mapping["tavily"]["api_key"] == "tvly-secret"
+    s.close()
+
+
+def test_router_complete_with_tool_loop_in_group(keyway_env: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tool loop must work with group-scoped providers (dict + decrypted key)."""
+    s = LLMStore(keyway_env / "keyway.db", secret=SECRET)
+    s.create_provider_in_group("default", "p1", "P1", "https://x/v1", "k")
+    s.create_route_in_group("default", "alias-1", "p1", "model-x")
+    s.create_tool_provider_in_group("default", "tavily", "Tavily", "tvly-test")
+    r = LLMRouter(s)
+
+    call_count = {"n": 0}
+    seen_providers: list[Any] = []
+
+    async def fake_call_non_stream(self, provider, model, body):
+        call_count["n"] += 1
+        msgs = body.get("messages", [])
+        has_tool = any(m.get("role") == "tool" for m in msgs)
+        if has_tool:
+            return {
+                "id": "x", "object": "chat.completion",
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": "done"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            }
+        return {
+            "id": "x", "object": "chat.completion",
+            "choices": [{"index": 0, "message": {
+                "role": "assistant", "content": None,
+                "tool_calls": [{
+                    "id": "call_1", "type": "function",
+                    "function": {"name": "tavily_search", "arguments": json.dumps({"query": "q"})},
+                }],
+            }, "finish_reason": "tool_calls"}],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 4, "total_tokens": 7},
+        }
+    monkeypatch.setattr(LLMRouter, "_call_upstream_non_stream", fake_call_non_stream)
+
+    from keyway import llm_router as llm_router_mod
+
+    async def fake_execute_tool(name, args, providers):
+        seen_providers.append(providers)
+        assert isinstance(providers, dict)
+        assert providers["tavily"]["api_key"] == "tvly-test"
+        return json.dumps({"results": [{"title": "t", "url": "u", "content": "c"}]})
+    monkeypatch.setattr(llm_router_mod, "execute_tool", fake_execute_tool)
+
+    import asyncio
+    resolved = r.resolve_route("alias-1", group_id="default")
+    out = asyncio.run(r.complete({"model": "alias-1", "messages": []}, resolved=resolved))
+    assert call_count["n"] == 2
+    assert out["choices"][0]["message"]["content"] == "done"
+    assert len(seen_providers) == 1
     s.close()
 
 
@@ -750,9 +829,11 @@ def test_complete_auto_select_failover(keyway_env: Path, monkeypatch: pytest.Mon
     candidates = router.resolve_route_auto("smart", group_id="default", required_protocol="openai")
 
     call_providers: list[str] = []
+    call_models: list[str] = []
 
     async def fake_call_non_stream(self, provider, model, body):
         call_providers.append(provider["provider_id"])
+        call_models.append(model)
         if provider["provider_id"] == "p1":
             raise UpstreamError("upstream 503: service unavailable", status_code=503)
         return {
@@ -768,6 +849,7 @@ def test_complete_auto_select_failover(keyway_env: Path, monkeypatch: pytest.Mon
     ))
     assert result["choices"][0]["message"]["content"] == "ok from p2"
     assert call_providers == ["p1", "p2"]
+    assert call_models == ["m1", "m2"], "each candidate must use its own upstream_model"
     # p1 should have a failure recorded
     assert s.is_circuit_open("p1") is False  # only 1 failure
     s.close()
@@ -999,7 +1081,7 @@ def test_adapter_pipeline_replaces_image_with_description(
     s.create_route_in_group("default", "vl", "p1", "vision-model")
     router = LLMRouter(s)
 
-    async def fake_complete(self, req_body, api_key_id=None, protocol=None, resolved=None):
+    async def fake_complete(self, req_body, api_key_id=None, protocol=None, resolved=None, **kwargs):
         return {
             "id": "x", "object": "chat.completion",
             "choices": [{"message": {"role": "assistant", "content": "a cat sitting on a desk"}}],
@@ -1029,7 +1111,7 @@ def test_adapter_pipeline_skip_image_fallback(
     s.create_route_in_group("default", "vl", "p1", "vision-model")
     router = LLMRouter(s)
 
-    async def fake_complete(self, req_body, api_key_id=None, protocol=None, resolved=None):
+    async def fake_complete(self, req_body, api_key_id=None, protocol=None, resolved=None, **kwargs):
         raise UpstreamError("vision model failed", status_code=503)
     monkeypatch.setattr(LLMRouter, "complete", fake_complete)
 
@@ -1053,7 +1135,7 @@ def test_adapter_pipeline_error_fallback_propagates(
     s.create_route_in_group("default", "vl", "p1", "vision-model")
     router = LLMRouter(s)
 
-    async def fake_complete(self, req_body, api_key_id=None, protocol=None, resolved=None):
+    async def fake_complete(self, req_body, api_key_id=None, protocol=None, resolved=None, **kwargs):
         raise UpstreamError("vision model failed", status_code=503)
     monkeypatch.setattr(LLMRouter, "complete", fake_complete)
 
@@ -1086,7 +1168,7 @@ def test_v1_chat_completions_adapter_mode(
     # Mock the vision model's complete call (first call) and the text model's complete (second call)
     call_count = {"n": 0}
 
-    async def fake_complete(self, req_body, api_key_id=None, protocol=None, resolved=None):
+    async def fake_complete(self, req_body, api_key_id=None, protocol=None, resolved=None, **kwargs):
         call_count["n"] += 1
         if call_count["n"] == 1:
             # vision describe call
@@ -1125,7 +1207,7 @@ def test_v1_chat_completions_adapter_no_image_passthrough(
 
     call_count = {"n": 0}
 
-    async def fake_complete(self, req_body, api_key_id=None, protocol=None, resolved=None):
+    async def fake_complete(self, req_body, api_key_id=None, protocol=None, resolved=None, **kwargs):
         call_count["n"] += 1
         return {"choices": [{"message": {"role": "assistant", "content": "hi"}}]}
     monkeypatch.setattr(LLMRouter, "complete", fake_complete)
@@ -1162,7 +1244,7 @@ def test_fusion_orchestrator_compare_and_synthesize(
 
     call_models: list[str] = []
 
-    async def fake_complete(self, req_body, api_key_id=None, protocol=None, resolved=None):
+    async def fake_complete(self, req_body, api_key_id=None, protocol=None, resolved=None, **kwargs):
         model = req_body.get("model", "")
         call_models.append(model)
         if model == "judge":
@@ -1198,7 +1280,7 @@ def test_fusion_orchestrator_majority_vote(
     router = LLMRouter(s)
     candidates = router.resolve_route_auto("fusion-alias", group_id="default", required_protocol="openai")
 
-    async def fake_complete(self, req_body, api_key_id=None, protocol=None, resolved=None):
+    async def fake_complete(self, req_body, api_key_id=None, protocol=None, resolved=None, **kwargs):
         model = req_body.get("model", "")
         if model == "judge":
             return {"choices": [{"message": {"role": "assistant", "content": "4"}}]}
@@ -1250,7 +1332,7 @@ def test_fusion_orchestrator_all_candidates_fail(
     router = LLMRouter(s)
     candidates = router.resolve_route_auto("fusion-alias", group_id="default", required_protocol="openai")
 
-    async def fake_complete(self, req_body, api_key_id=None, protocol=None, resolved=None):
+    async def fake_complete(self, req_body, api_key_id=None, protocol=None, resolved=None, **kwargs):
         raise UpstreamError("upstream 503", status_code=503)
     monkeypatch.setattr(LLMRouter, "complete", fake_complete)
 
@@ -1261,13 +1343,14 @@ def test_fusion_orchestrator_all_candidates_fail(
             {"model": "fusion-alias", "messages": []},
             candidates, judge_alias="judge", group_id="default",
         ))
-    assert "all fusion candidates failed" in str(exc_info.value) or exc_info.value.status_code == 503
+    assert "successful candidates" in str(exc_info.value) or "all fusion candidates failed" in str(exc_info.value)
     s.close()
 
 
 def test_fusion_orchestrator_partial_failure(
     keyway_env: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """With default min_candidates=2, one survivor is not enough."""
     s = LLMStore(keyway_env / "keyway.db", secret=SECRET)
     s.create_provider_in_group("default", "p1", "P1", "https://x/v1", "k")
     s.create_provider_in_group("default", "p2", "P2", "https://y/v1", "k")
@@ -1279,7 +1362,7 @@ def test_fusion_orchestrator_partial_failure(
     router = LLMRouter(s)
     candidates = router.resolve_route_auto("fusion-alias", group_id="default", required_protocol="openai")
 
-    async def fake_complete(self, req_body, api_key_id=None, protocol=None, resolved=None):
+    async def fake_complete(self, req_body, api_key_id=None, protocol=None, resolved=None, **kwargs):
         model = req_body.get("model", "")
         if model == "judge":
             return {"choices": [{"message": {"role": "assistant", "content": "final from judge"}}]}
@@ -1291,11 +1374,18 @@ def test_fusion_orchestrator_partial_failure(
 
     orch = FusionOrchestrator(router)
     import asyncio
+    with pytest.raises(UpstreamError) as exc_info:
+        asyncio.run(orch.fuse(
+            {"model": "fusion-alias", "messages": [{"role": "user", "content": "hi"}]},
+            candidates, judge_alias="judge", group_id="default",
+        ))
+    assert "successful candidates" in str(exc_info.value)
+
+    # With min_candidates=1, the single survivor is accepted and judged
     result = asyncio.run(orch.fuse(
         {"model": "fusion-alias", "messages": [{"role": "user", "content": "hi"}]},
-        candidates, judge_alias="judge", group_id="default",
+        candidates, judge_alias="judge", group_id="default", min_candidates=1,
     ))
-    # Only p2 succeeded, judge still runs
     assert result["members"] == ["p2"]
     assert result["result"]["choices"][0]["message"]["content"] == "final from judge"
     s.close()
@@ -1320,7 +1410,7 @@ def test_v1_chat_completions_fusion_mode(
     s.create_key_in_group("default", hash_key(plaintext), key_prefix(plaintext), "test")
     s.close()
 
-    async def fake_complete(self, req_body, api_key_id=None, protocol=None, resolved=None):
+    async def fake_complete(self, req_body, api_key_id=None, protocol=None, resolved=None, **kwargs):
         model = req_body.get("model", "")
         if model == "judge":
             return {"choices": [{"message": {"role": "assistant", "content": "best answer"}}]}
@@ -1401,8 +1491,15 @@ def test_fusion_id_logged_in_request_logs(
     router = LLMRouter(s)
     candidates = router.resolve_route_auto("fusion-alias", group_id="default", required_protocol="openai")
 
-    async def fake_complete(self, req_body, api_key_id=None, protocol=None, resolved=None):
+    async def fake_complete(self, req_body, api_key_id=None, protocol=None, resolved=None, **kwargs):
+        fusion_id = kwargs.get("fusion_id")
         model = req_body.get("model", "")
+        route, provider = resolved if resolved else ({"alias": model, "upstream_model": model}, {"provider_id": "x", "group_id": "default"})
+        self._log(
+            route.get("alias", model), provider.get("group_id") or "default",
+            provider.get("provider_id", ""), route.get("upstream_model", ""),
+            200, 0, 0, 1, "", api_key_id, fusion_id=fusion_id,
+        )
         if model == "judge":
             return {"choices": [{"message": {"role": "assistant", "content": "ok"}}]}
         return {"choices": [{"message": {"role": "assistant", "content": "candidate"}}]}
@@ -1417,5 +1514,148 @@ def test_fusion_id_logged_in_request_logs(
     fusion_id = result["fusion_id"]
     logs = s.list_logs()
     fusion_logs = [l for l in logs if l.get("fusion_id") == fusion_id]
-    assert len(fusion_logs) >= 1  # at least the judge log
+    # N candidates + 1 judge, all tagged with the same fusion_id
+    assert len(fusion_logs) >= 3
     s.close()
+
+
+# ---------- Anthropic URL normalization ----------
+
+def test_anthropic_messages_url_normalization() -> None:
+    assert LLMRouter._anthropic_messages_url("https://api.anthropic.com") == "https://api.anthropic.com/v1/messages"
+    assert LLMRouter._anthropic_messages_url("https://api.anthropic.com/") == "https://api.anthropic.com/v1/messages"
+    assert LLMRouter._anthropic_messages_url("https://api.anthropic.com/v1") == "https://api.anthropic.com/v1/messages"
+    assert LLMRouter._anthropic_messages_url("https://api.anthropic.com/v1/") == "https://api.anthropic.com/v1/messages"
+    assert LLMRouter._anthropic_messages_url("https://proxy.example/v1/messages") == "https://proxy.example/v1/messages"
+    assert LLMRouter._anthropic_messages_url("https://proxy.example/custom/messages") == "https://proxy.example/custom/messages"
+
+
+# ---------- Session TTL ----------
+
+def test_session_store_expires() -> None:
+    from keyway.app import _SessionStore
+    store = _SessionStore(ttl_seconds=1)
+    token = store.create()
+    assert store.valid(token) is True
+    import time as _time
+    _time.sleep(1.1)
+    assert store.valid(token) is False
+    assert store.valid(token) is False  # still destroyed
+
+
+# ---------- Desktop mode auth ----------
+
+def test_desktop_mode_bypasses_auth_for_loopback(keyway_env: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("KEYWAY_DESKTOP_MODE", "1")
+    monkeypatch.setenv("KEYWAY_HOST", "127.0.0.1")
+    with TestClient(create_app()) as c:
+        r = c.get("/admin/llm/groups")
+        assert r.status_code == 200
+        assert r.json()["ok"] is True
+
+
+def test_desktop_mode_no_bypass_when_not_loopback_bound(keyway_env: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """If desktop_mode somehow stays on a non-loopback host, auth is still required."""
+    monkeypatch.setenv("KEYWAY_DESKTOP_MODE", "1")
+    monkeypatch.setenv("KEYWAY_HOST", "0.0.0.0")
+    app = create_app()
+    # create_app forces host → 127.0.0.1, so bypass applies after override
+    assert app.state.settings.host == "127.0.0.1"
+    from keyway.app import _is_loopback_host
+    assert _is_loopback_host("127.0.0.1")
+    assert not _is_loopback_host("0.0.0.0")
+    assert not _is_loopback_host("8.8.8.8")
+
+
+def test_desktop_mode_forces_loopback_host(keyway_env: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("KEYWAY_DESKTOP_MODE", "1")
+    monkeypatch.setenv("KEYWAY_HOST", "0.0.0.0")
+    app = create_app()
+    assert app.state.settings.host == "127.0.0.1"
+    assert os.environ["KEYWAY_HOST"] == "127.0.0.1"
+
+
+# ---------- /v1/generations + count_tokens ----------
+
+def test_v1_count_tokens(keyway_env: Path) -> None:
+    s = LLMStore(keyway_env / "keyway.db", secret=SECRET)
+    plaintext = generate_key()
+    s.create_key_in_group("default", hash_key(plaintext), key_prefix(plaintext), "test")
+    s.close()
+    with TestClient(create_app()) as c:
+        r = c.post(
+            "/v1/messages/count_tokens",
+            headers={"Authorization": f"Bearer {plaintext}"},
+            json={"model": "x", "messages": [{"role": "user", "content": "hello world"}]},
+        )
+        assert r.status_code == 200
+        assert r.json()["input_tokens"] >= 1
+
+
+def test_v1_generations_requires_upstream_path(keyway_env: Path) -> None:
+    s = LLMStore(keyway_env / "keyway.db", secret=SECRET)
+    s.create_provider_in_group("default", "p1", "P1", "https://x/v1", "k")
+    s.create_route_in_group("default", "img", "p1", "model-x")  # no upstream_path
+    plaintext = generate_key()
+    s.create_key_in_group("default", hash_key(plaintext), key_prefix(plaintext), "test")
+    s.close()
+    with TestClient(create_app()) as c:
+        r = c.post(
+            "/v1/generations",
+            headers={"Authorization": f"Bearer {plaintext}"},
+            json={"model": "img", "input": {"prompt": "cat"}},
+        )
+        assert r.status_code == 400
+        assert "upstream_path" in r.text
+
+
+def test_v1_generations_success(keyway_env: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    s = LLMStore(keyway_env / "keyway.db", secret=SECRET)
+    s.create_provider_in_group("default", "p1", "P1", "https://x/v1", "k")
+    s.create_route_in_group(
+        "default", "img", "p1", "model-x",
+        upstream_path="services/aigc/text2image/image-synthesis",
+    )
+    plaintext = generate_key()
+    s.create_key_in_group("default", hash_key(plaintext), key_prefix(plaintext), "test")
+    s.close()
+
+    async def fake_forward(self, body, resolved, api_key_id=None, extra_headers=None):
+        return {"output": {"task_id": "t-99", "task_status": "PENDING"}}
+    monkeypatch.setattr(LLMRouter, "forward_to_path", fake_forward)
+
+    with TestClient(create_app()) as c:
+        r = c.post(
+            "/v1/generations",
+            headers={
+                "Authorization": f"Bearer {plaintext}",
+                "X-DashScope-Async": "enable",
+            },
+            json={"model": "img", "input": {"prompt": "cat"}},
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["output"]["task_id"] == "t-99"
+
+
+def test_v1_messages_fusion_rejected(keyway_env: Path) -> None:
+    s = LLMStore(keyway_env / "keyway.db", secret=SECRET)
+    s.create_provider_in_group("default", "p1", "P1", "https://x", "k", protocol="anthropic")
+    s.create_provider_in_group("default", "p2", "P2", "https://y", "k", protocol="anthropic")
+    import json as _json
+    r = s.create_route_in_group(
+        "default", "fuse", "p1", "m1", mode="fusion",
+        fusion_config=_json.dumps({"judge_alias": "judge"}),
+    )
+    s.add_route_provider(r["route_id"], "p1", "m1", priority=0)
+    s.add_route_provider(r["route_id"], "p2", "m2", priority=1)
+    plaintext = generate_key()
+    s.create_key_in_group("default", hash_key(plaintext), key_prefix(plaintext), "test")
+    s.close()
+    with TestClient(create_app()) as c:
+        resp = c.post(
+            "/v1/messages",
+            headers={"Authorization": f"Bearer {plaintext}"},
+            json={"model": "fuse", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 16},
+        )
+        assert resp.status_code == 400
+        assert "fusion" in resp.text.lower()

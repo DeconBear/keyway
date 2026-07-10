@@ -8,13 +8,13 @@ one of several strategies.
 Fusion does not support streaming — the client waits for all candidates
 and the judge to complete. Each fusion request logs N+1 entries to
 ``llm_request_logs`` grouped by a shared ``fusion_id``.
+
+Fusion currently supports OpenAI-protocol candidates and judges only.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
-import time
 import uuid
 from typing import Any
 
@@ -65,8 +65,11 @@ class FusionOrchestrator:
             valid.append((pid, upstream_model, resp))
             members.append(pid)
 
-        if not valid:
-            raise UpstreamError("all fusion candidates failed")
+        if len(valid) < min_candidates:
+            raise UpstreamError(
+                f"fusion requires at least {min_candidates} successful candidates, "
+                f"got {len(valid)}"
+            )
 
         # 3. Judge
         judge_fn = {
@@ -85,16 +88,18 @@ class FusionOrchestrator:
         timeout_seconds: int,
     ) -> dict[str, Any]:
         """Call a single candidate provider. Records success/failure to health."""
-        resolved = (route, provider)
+        resolved = self.router._resolved_with_model(route, provider, upstream_model)
         body = dict(req_body)
         try:
             result = await asyncio.wait_for(
-                self.router.complete(body, api_key_id=api_key_id, protocol="openai",
-                                     resolved=resolved),
+                self.router.complete(
+                    body, api_key_id=api_key_id, protocol="openai",
+                    resolved=resolved, fusion_id=fusion_id,
+                ),
                 timeout=timeout_seconds,
             )
             return result
-        except Exception as exc:
+        except Exception:
             # Health recording is handled by router.complete's internal error path
             raise
 
@@ -196,24 +201,22 @@ class FusionOrchestrator:
         group_id: str, api_key_id: str | None, fusion_id: str,
         valid: list[tuple[str, str, dict[str, Any]]],
     ) -> dict[str, Any]:
-        """Call the judge model and return its response."""
+        """Call the judge model (resolved within the same group) and return its response."""
         prompt_body["model"] = judge_alias
-        start = time.time()
+        resolved = self.router.resolve_route(
+            judge_alias, group_id=group_id, required_protocol="openai",
+        )
+        if not resolved:
+            raise UpstreamError(
+                f"judge alias '{judge_alias}' not found or not openai in group '{group_id or 'default'}'"
+            )
         try:
-            result = await self.router.complete(prompt_body, api_key_id=api_key_id, protocol="openai")
-            latency = int((time.time() - start) * 1000)
-            self.router._log(
-                judge_alias, group_id, "judge", "judge-model",
-                200, 0, 0, latency, "", api_key_id, fusion_id=fusion_id,
+            # complete() logs with fusion_id; no extra judge log needed
+            return await self.router.complete(
+                prompt_body, api_key_id=api_key_id, protocol="openai",
+                resolved=resolved, fusion_id=fusion_id,
             )
-            return result
         except Exception as exc:
-            latency = int((time.time() - start) * 1000)
-            error_msg = f"{type(exc).__name__}: {exc}"
-            self.router._log(
-                judge_alias, group_id, "judge", "judge-model",
-                502, 0, 0, latency, error_msg, api_key_id, fusion_id=fusion_id,
-            )
             raise UpstreamError(f"judge model failed: {exc}") from exc
 
     @staticmethod

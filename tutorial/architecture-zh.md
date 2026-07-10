@@ -22,7 +22,6 @@ src/keyway/
 ├── config.py            # 从环境变量读取配置
 ├── crypto.py            # Fernet 加密辅助
 ├── llm_keys.py          # db_sk_ key 生成、哈希、前缀
-├── llm_protocol.py      # 协议检测辅助
 ├── llm_router.py        # LLMRouter：解析、流式、完成、auto-select、探测
 ├── llm_store.py         # LLMStore：SQLite CRUD（8 张表）
 ├── llm_tools.py         # 内置工具（Tavily 搜索）

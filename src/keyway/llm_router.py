@@ -131,17 +131,35 @@ class LLMRouter:
         return [(r, p, m) for r, p, m, _ in candidates]
 
     def get_tool_definitions(self, group_id: str = "") -> list[dict[str, Any]]:
-        """Return builtin tool schemas to inject into OpenAI calls."""
+        """Return builtin tool schemas to inject into OpenAI calls.
+
+        Only schemas whose ``tool_id`` has an enabled, keyed provider in the
+        (optional) group are returned. Empty enabled set → no tools.
+        """
         if group_id:
-            enabled = [p for p in self.store.list_tool_providers_in_group(group_id=group_id)
-                       if p.get("enabled") and p.get("api_key_set")]
+            rows = self.store.list_tool_providers_in_group(group_id=group_id)
         else:
-            enabled = {p["tool_id"] for p in self.store.list_tool_providers() if p.get("enabled") and p.get("api_key_set")}
-        if not enabled and not group_id:
-            return []
-        if not group_id:
-            return [schema for tid, schema in BUILTIN_TOOLS.items() if tid in enabled]
-        return list(BUILTIN_TOOLS.values())
+            rows = self.store.list_tool_providers()
+        enabled_ids = {
+            p["tool_id"] for p in rows
+            if p.get("enabled") and p.get("api_key_set")
+        }
+        return [schema for tid, schema in BUILTIN_TOOLS.items() if tid in enabled_ids]
+
+    def _tool_providers_map(self, group_id: str = "") -> dict[str, dict[str, Any]]:
+        """Build ``{tool_id: provider_row_with_decrypted_api_key}`` for execute_tool."""
+        if group_id:
+            rows = self.store.list_tool_providers_in_group(group_id=group_id)
+        else:
+            rows = self.store.list_tool_providers()
+        result: dict[str, dict[str, Any]] = {}
+        for p in rows:
+            if not p.get("enabled") or not p.get("api_key_set"):
+                continue
+            full = self.store.get_tool_provider_with_key(p["tool_id"])
+            if full and full.get("api_key"):
+                result[p["tool_id"]] = full
+        return result
 
     # -------- upstream HTTP helpers --------
     async def _call_upstream_stream(
@@ -179,10 +197,28 @@ class LLMRouter:
             raise UpstreamError(f"upstream {resp.status_code}: {resp.text[:300]}", status_code=resp.status_code)
         return resp.json()
 
+    @staticmethod
+    def _anthropic_messages_url(base_url: str) -> str:
+        """Build Anthropic Messages URL without doubling ``/v1``.
+
+        Accepts common base forms:
+        - ``https://api.anthropic.com`` → ``.../v1/messages``
+        - ``https://api.anthropic.com/v1`` → ``.../v1/messages``
+        - ``https://proxy.example/v1/messages`` → unchanged
+        """
+        base = (base_url or "").rstrip("/")
+        if base.endswith("/v1/messages"):
+            return base
+        if base.endswith("/messages"):
+            return base
+        if base.endswith("/v1"):
+            return base + "/messages"
+        return base + "/v1/messages"
+
     async def _call_upstream_anthropic_stream(
         self, provider: dict[str, Any], body: dict[str, Any]
     ) -> AsyncGenerator[bytes, None]:
-        url = provider["base_url"].rstrip("/") + "/v1/messages"
+        url = self._anthropic_messages_url(provider["base_url"])
         headers = {
             "x-api-key": provider["api_key"],
             "anthropic-version": "2023-06-01",
@@ -203,7 +239,7 @@ class LLMRouter:
     async def _call_upstream_anthropic_non_stream(
         self, provider: dict[str, Any], body: dict[str, Any]
     ) -> dict[str, Any]:
-        url = provider["base_url"].rstrip("/") + "/v1/messages"
+        url = self._anthropic_messages_url(provider["base_url"])
         headers = {
             "x-api-key": provider["api_key"],
             "anthropic-version": "2023-06-01",
@@ -370,11 +406,21 @@ class LLMRouter:
         result["message"] = f"{models_err}. Add a route under this provider to enable chat fallback."
         return result
 
+    @staticmethod
+    def _resolved_with_model(
+        route: dict[str, Any], provider: dict[str, Any], upstream_model: str,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Return ``(route, provider)`` with the candidate's upstream_model applied."""
+        route_copy = dict(route)
+        route_copy["upstream_model"] = upstream_model
+        return route_copy, provider
+
     # -------- streaming (pure pass-through for both protocols) --------
     async def stream(
         self, req_body: dict[str, Any], api_key_id: str | None = None,
         protocol: str | None = None,
         resolved: tuple[dict[str, Any], dict[str, Any]] | None = None,
+        fusion_id: str | None = None,
     ) -> AsyncGenerator[bytes, None]:
         if resolved is None:
             alias = req_body.get("model", "")
@@ -406,6 +452,7 @@ class LLMRouter:
             else:
                 async for chunk in self._call_upstream_stream(provider, upstream_model, body):
                     yield chunk
+            status_code = 200
         except UpstreamError as exc:
             error_msg = f"{type(exc).__name__}: {exc}"
             status_code = exc.status_code or 502
@@ -431,13 +478,15 @@ class LLMRouter:
             latency = int((time.time() - start) * 1000)
             self._log(route["alias"], provider.get("group_id") or "",
                       provider.get("provider_id", ""), upstream_model, status_code,
-                      req_tokens, resp_tokens, latency, error_msg, api_key_id)
+                      req_tokens, resp_tokens, latency, error_msg, api_key_id,
+                      fusion_id=fusion_id)
 
     # -------- non-streaming --------
     async def complete(
         self, req_body: dict[str, Any], api_key_id: str | None = None,
         protocol: str | None = None,
         resolved: tuple[dict[str, Any], dict[str, Any]] | None = None,
+        fusion_id: str | None = None,
     ) -> dict[str, Any]:
         if resolved is None:
             alias = req_body.get("model", "")
@@ -481,6 +530,7 @@ class LLMRouter:
                             int(usage.get("input_tokens") or 0),
                             int(usage.get("output_tokens") or 0),
                             int((time.time() - iter_start) * 1000), "", api_key_id,
+                            fusion_id=fusion_id,
                         )
                         self.store.record_provider_success(provider.get("provider_id", ""), group_id)
                         return resp_json
@@ -491,6 +541,7 @@ class LLMRouter:
                         route["alias"], group_id, provider.get("provider_id", ""),
                         upstream_model, exc.status_code or 502,
                         0, 0, int((time.time() - iter_start) * 1000), iter_error, api_key_id,
+                        fusion_id=fusion_id,
                     )
                     if exc.retryable:
                         self.store.record_provider_failure(provider.get("provider_id", ""), group_id)
@@ -503,6 +554,7 @@ class LLMRouter:
                     route["alias"], group_id, provider.get("provider_id", ""),
                     upstream_model, iter_status,
                     iter_req, iter_resp, int((time.time() - iter_start) * 1000), "", api_key_id,
+                    fusion_id=fusion_id,
                 )
                 self.store.record_provider_success(provider.get("provider_id", ""), group_id)
 
@@ -513,11 +565,7 @@ class LLMRouter:
                     return resp_json
 
                 body.setdefault("messages", []).append(message)
-                tool_providers = self.store.list_tool_providers_in_group(group_id=group_id) if group_id else {
-                    p["tool_id"]: p
-                    for p in self.store.list_tool_providers()
-                    if p.get("enabled") and p.get("api_key_set")
-                }
+                tool_providers = self._tool_providers_map(group_id)
                 for tc in tool_calls:
                     fn = tc.get("function", {})
                     name = fn.get("name", "")
@@ -549,7 +597,7 @@ class LLMRouter:
             raise ValueError(f"no candidates for model alias: {req_body.get('model','')}")
         last_exc: Exception | None = None
         for route, provider, upstream_model in candidates:
-            resolved = (route, provider)
+            resolved = self._resolved_with_model(route, provider, upstream_model)
             try:
                 body = dict(req_body)
                 return await self.complete(
@@ -585,7 +633,7 @@ class LLMRouter:
             yield b"data: [DONE]\n\n"
             return
         route, provider, upstream_model = candidates[0]
-        resolved = (route, provider)
+        resolved = self._resolved_with_model(route, provider, upstream_model)
         body = dict(req_body)
         async for chunk in self.stream(
             body, api_key_id=api_key_id, protocol=protocol, resolved=resolved,

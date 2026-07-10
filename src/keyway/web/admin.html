@@ -61,13 +61,32 @@
     .gate h1 { font-size: 1.25rem; margin: 0 0 0.6rem; }
     .gate p { margin: 0; color: var(--muted); }
     .gate a { font-size: 0.85rem; }
+    .modal-overlay { position: fixed; inset: 0; z-index: 50; display: flex; align-items: center; justify-content: center; padding: 1rem; background: rgba(0,0,0,0.4); opacity: 0; pointer-events: none; transition: opacity 0.15s ease; }
+    .modal-overlay.open { opacity: 1; pointer-events: auto; }
+    .modal { width: 100%; max-width: 420px; padding: 1.4rem 1.5rem; border: 1px solid var(--border); border-radius: 12px; background: var(--card); box-shadow: 0 12px 40px rgba(0,0,0,0.2); transform: translateY(8px); transition: transform 0.15s ease; }
+    .modal-overlay.open .modal { transform: translateY(0); }
+    .modal h2 { font-size: 1.1rem; font-weight: 500; margin: 0 0 0.3rem; }
+    .modal .modal-sub { font-size: 0.8rem; color: var(--muted); margin: 0 0 1.1rem; }
+    .modal label { font-size: 0.75rem; color: var(--muted); display: block; margin-bottom: 0.2rem; }
+    .modal input { width: 100%; padding: 0.5rem 0.65rem; font-size: 0.88rem; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); font-family: inherit; margin-bottom: 0.8rem; }
+    .modal input:focus { outline: none; border-color: var(--accent); }
+    .modal input.mono { font-family: 'IBM Plex Mono', monospace; font-size: 0.84rem; }
+    .modal .modal-hint { font-size: 0.72rem; color: var(--muted); margin: -0.5rem 0 0.9rem; line-height: 1.45; }
+    .modal .modal-actions { display: flex; gap: 0.5rem; justify-content: flex-end; margin-top: 0.2rem; }
+    .modal button { padding: 0.5rem 1.1rem; font-size: 0.88rem; border-radius: 6px; cursor: pointer; font-family: inherit; }
+    .modal button.primary { background: var(--accent); color: var(--bg); border: 1px solid var(--accent); }
+    .modal button.primary:hover { opacity: 0.85; }
+    .modal button.ghost { background: var(--card); color: var(--text); border: 1px solid var(--border); }
+    .modal button.ghost:hover { background: var(--bg); }
+    .modal .modal-error { font-size: 0.78rem; color: var(--err); min-height: 1rem; margin-bottom: 0.6rem; }
     .pill { display: inline-block; font-size: 0.7rem; padding: 1px 6px; border-radius: 3px; }
     .pill.openai { background: #e0e7ff; color: #3730a3; }
     .pill.anthropic { background: #fef3c7; color: #92400e; }
     .pill.enabled { background: #dcfce7; color: #166534; }
     .pill.disabled { background: #fee2e2; color: #991b1b; }
     .pill.default { background: #e0e7ff; color: #3730a3; }
-    @media (prefers-color-scheme: dark) { .pill.openai { background: #1a1a3a; color: #a5b4fc; } .pill.anthropic { background: #3a2a0a; color: #fcd34d; } .pill.enabled { background: #0a3a1a; color: #4ade80; } .pill.disabled { background: #3a0a0a; color: #f87171; } .pill.default { background: #1a1a3a; color: #a5b4fc; } }
+    .pill.mode { background: #e0f2fe; color: #075985; }
+@media (prefers-color-scheme: dark) { .pill.openai { background: #1a1a3a; color: #a5b4fc; } .pill.anthropic { background: #3a2a0a; color: #fcd34d; } .pill.enabled { background: #0a3a1a; color: #4ade80; } .pill.disabled { background: #3a0a0a; color: #f87171; } .pill.default { background: #1a1a3a; color: #a5b4fc; } .pill.mode { background: #0c2a3a; color: #7dd3fc; } }
   </style>
 </head>
 <body>
@@ -134,14 +153,30 @@
 
         <section class="section" id="routes">
           <h2>Model Routes</h2>
-          <p class="meta">An alias is the user-facing model name (e.g. <code>deepseek-v4-pro</code>), routed to this group's provider upstream model.</p>
+          <p class="meta">An alias is the user-facing model name (e.g. <code>deepseek-v4-pro</code>), routed to this group's provider upstream model. Modes: <code>direct</code>, <code>auto-select</code>, <code>adapter</code>, <code>fusion</code>.</p>
           <form id="route-form" class="form">
             <input type="hidden" name="_edit_id" id="route-edit-id" />
             <div><label>Alias (client-facing)</label><input name="alias" required placeholder="deepseek-v4-pro" /></div>
             <div><label>Provider</label><select name="provider_id" required id="route-provider-select"></select></div>
             <div><label>Upstream Model</label><input name="upstream_model" required placeholder="deepseek-reasoner" /></div>
+            <div><label>Mode</label>
+              <select name="mode" id="route-mode">
+                <option value="direct" selected>direct</option>
+                <option value="auto-select">auto-select</option>
+                <option value="adapter">adapter</option>
+                <option value="fusion">fusion</option>
+              </select>
+            </div>
             <div><label>Enabled</label><select name="enabled"><option value="1">Yes</option><option value="0">No</option></select></div>
             <div class="full"><label>Upstream Path (for generation endpoints)</label><input name="upstream_path" placeholder="services/aigc/text2image/image-synthesis" /></div>
+            <div class="full" id="route-adapter-wrap" style="display:none;">
+              <label>Adapter Config (JSON)</label>
+              <textarea name="adapter_config" id="route-adapter-config" placeholder='{"vision_alias":"qwen-vl","fallback":"error"}'></textarea>
+            </div>
+            <div class="full" id="route-fusion-wrap" style="display:none;">
+              <label>Fusion Config (JSON)</label>
+              <textarea name="fusion_config" id="route-fusion-config" placeholder='{"judge_alias":"judge","strategy":"compare_and_synthesize","min_candidates":2}'></textarea>
+            </div>
             <div class="full"><label>Note (optional)</label><input name="note" /></div>
             <div class="actions">
               <button type="submit" class="primary" id="route-submit">Add Route</button>
@@ -150,6 +185,31 @@
             </div>
           </form>
           <div id="route-list" class="list"></div>
+          <div id="route-providers-panel" style="display:none; margin-top: 0.9rem; padding-top: 0.9rem; border-top: 1px dashed var(--divider);">
+            <h3 style="font-size:0.95rem;font-weight:500;margin:0 0 0.5rem;">Route Providers <span id="rp-route-label" style="color:var(--muted);font-weight:400;font-size:0.8rem;"></span></h3>
+            <p class="meta">Extra providers for <code>auto-select</code> / <code>fusion</code>. Priority: lower number = higher priority.</p>
+            <form id="rp-form" class="form">
+              <input type="hidden" id="rp-route-id" />
+              <div><label>Provider</label><select id="rp-provider-select" required></select></div>
+              <div><label>Upstream Model</label><input id="rp-upstream-model" required placeholder="model-id" /></div>
+              <div><label>Priority</label><input id="rp-priority" type="number" value="1" /></div>
+              <div class="actions">
+                <button type="submit" class="primary">Add Provider</button>
+                <span id="rp-status" class="status"></span>
+              </div>
+            </form>
+            <div id="rp-list" class="list"></div>
+          </div>
+        </section>
+
+        <section class="section" id="health">
+          <h2>Provider Health</h2>
+          <p class="meta">Circuit breaker status for this group. Open circuits are skipped by auto-select / fusion until reset or cooldown ends.</p>
+          <div style="margin-bottom:0.5rem;">
+            <button type="button" id="health-refresh" style="padding:0.35rem 0.75rem;font-size:0.82rem;border:1px solid var(--border);border-radius:5px;background:var(--card);color:var(--text);cursor:pointer;">Refresh</button>
+            <span id="health-status" class="status"></span>
+          </div>
+          <div id="health-list" class="list"></div>
         </section>
 
         <section class="section" id="tool-providers">
@@ -212,6 +272,23 @@
       <pre id="output" style="margin-top: 1rem; padding: 0.6rem; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; font-size: 0.78rem; max-height: 200px; overflow: auto;"></pre>
     </div>
   </main>
+
+  <div class="modal-overlay" id="group-modal">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="group-modal-title">
+      <h2 id="group-modal-title">New Routing Group</h2>
+      <p class="modal-sub">A group bundles providers, routes, tool keys and self-issued API keys.</p>
+      <label for="gm-gid">Group ID (slug)</label>
+      <input id="gm-gid" class="mono" autocomplete="off" placeholder="deepseek-main" />
+      <p class="modal-hint">Lowercase alphanumeric, <code>-</code> and <code>_</code>. Used as the URL path segment.</p>
+      <label for="gm-name">Display name</label>
+      <input id="gm-name" autocomplete="off" placeholder="DeepSeek Main" />
+      <div class="modal-error" id="gm-error"></div>
+      <div class="modal-actions">
+        <button type="button" class="ghost" id="gm-cancel">Cancel</button>
+        <button type="button" class="primary" id="gm-create">Create Group</button>
+      </div>
+    </div>
+  </div>
 
   <script type="module" src="/assets/admin.js"></script>
 </body>

@@ -22,7 +22,6 @@ src/keyway/
 ├── config.py            # Settings from env vars
 ├── crypto.py            # Fernet encryption helpers
 ├── llm_keys.py          # db_sk_ key generation, hashing, prefix
-├── llm_protocol.py      # Protocol detection helpers
 ├── llm_router.py        # LLMRouter: resolve, stream, complete, auto-select, probe
 ├── llm_store.py         # LLMStore: SQLite CRUD (8 tables)
 ├── llm_tools.py         # Builtin tools (Tavily search)

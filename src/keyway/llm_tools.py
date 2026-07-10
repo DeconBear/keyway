@@ -43,8 +43,9 @@ TAVILY_SEARCH_TOOL: dict[str, Any] = {
 }
 
 
+# Keyed by llm_tool_providers.tool_id (e.g. "tavily"), not the OpenAI function name.
 BUILTIN_TOOLS: dict[str, dict[str, Any]] = {
-    "tavily_search": TAVILY_SEARCH_TOOL,
+    "tavily": TAVILY_SEARCH_TOOL,
 }
 
 

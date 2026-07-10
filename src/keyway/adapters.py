@@ -55,9 +55,17 @@ class ImageDescriber:
         from the response.
         """
         vision_req = self._build_vision_request(image_block, self.vision_alias)
+        resolved = self.router.resolve_route(
+            self.vision_alias, group_id=group_id, required_protocol="openai",
+        )
+        if not resolved:
+            raise UpstreamError(
+                f"vision alias '{self.vision_alias}' not found or not openai "
+                f"in group '{group_id or 'default'}'"
+            )
         try:
             resp = await self.router.complete(
-                vision_req, protocol="openai",
+                vision_req, protocol="openai", resolved=resolved,
             )
         except UpstreamError:
             raise

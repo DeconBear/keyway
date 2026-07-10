@@ -26,8 +26,10 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import secrets
 import sqlite3
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -81,24 +83,40 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-# ---- session store (in-memory, single-admin) ----
+# ---- session store (in-memory, single-admin, TTL-aware) ----
 class _SessionStore:
-    def __init__(self) -> None:
+    def __init__(self, ttl_seconds: int = SESSION_TTL_SECONDS) -> None:
         self._token: str = ""
+        self._expires_at: float = 0.0
+        self._ttl = ttl_seconds
 
     def create(self) -> str:
         self._token = secrets.token_urlsafe(32)
+        self._expires_at = time.time() + self._ttl
         return self._token
 
     def valid(self, token: str) -> bool:
-        return bool(self._token and token == self._token)
+        if not self._token or token != self._token:
+            return False
+        if time.time() > self._expires_at:
+            self.destroy()
+            return False
+        return True
 
     def destroy(self) -> None:
         self._token = ""
+        self._expires_at = 0.0
+
+
+def _is_loopback_host(host: str) -> bool:
+    h = (host or "").strip().lower()
+    return h in {"127.0.0.1", "localhost", "::1"}
 
 
 def create_app() -> FastAPI:
     settings = load_settings()
+
+    desktop_mode = os.getenv("KEYWAY_DESKTOP_MODE", "").strip().lower() in {"1", "true", "yes", "on", "y"}
 
     # ---- logging ----
     logger = logging.getLogger("keyway")
@@ -108,6 +126,15 @@ def create_app() -> FastAPI:
         handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
         logger.addHandler(handler)
         logger.propagate = False
+
+    # Desktop mode must only bind loopback — never expose auth-bypass on 0.0.0.0
+    if desktop_mode and not _is_loopback_host(settings.host):
+        logger.warning(
+            "KEYWAY_DESKTOP_MODE requires a loopback bind; overriding KEYWAY_HOST=%s → 127.0.0.1",
+            settings.host,
+        )
+        settings.host = "127.0.0.1"
+        os.environ["KEYWAY_HOST"] = "127.0.0.1"
 
     # ---- secret enforcement ----
     if crypto.is_dev_fallback(settings.secret):
@@ -150,6 +177,7 @@ def create_app() -> FastAPI:
     app.state.admin_token = admin_token
     app.state.sessions = sessions
     app.state.logger = logger
+    app.state.desktop_mode = desktop_mode
 
     # ==================== Auth helpers ====================
 
@@ -157,6 +185,12 @@ def create_app() -> FastAPI:
         request: Request,
         x_admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
     ) -> dict[str, Any]:
+        # Desktop mode: auth bypass only when the server is bound to loopback.
+        # (create_app / __main__ force KEYWAY_HOST → 127.0.0.1 in desktop mode.)
+        if getattr(request.app.state, "desktop_mode", False) and _is_loopback_host(
+            getattr(request.app.state.settings, "host", "")
+        ):
+            return {"ok": True}
         token = x_admin_token or request.cookies.get("keyway_admin_session", "")
         if token and token == request.app.state.admin_token:
             return {"ok": True}
@@ -171,10 +205,7 @@ def create_app() -> FastAPI:
         return crypto.encrypt_value(plaintext, settings.secret) if plaintext else ""
 
     def _llm_decrypt(token: str) -> str:
-        try:
-            return crypto.decrypt_value(token, settings.secret)
-        except Exception:
-            return ""
+        return crypto.decrypt_value(token, settings.secret)
 
     def _llm_bearer_auth(authorization: str | None = Header(default=None)) -> str:
         if not authorization or not authorization.lower().startswith("bearer "):
@@ -263,7 +294,7 @@ def create_app() -> FastAPI:
         base_url = request.app.state.settings.public_base_url
         if not base_url:
             base_url = str(request.base_url).rstrip("/")
-        return {"ok": True, "config": {"app_base_url": base_url}}
+        return {"ok": True, "config": {"app_base_url": base_url, "desktop_mode": request.app.state.desktop_mode}}
 
     # ==================== Admin: groups ====================
 
@@ -1005,54 +1036,17 @@ def create_app() -> FastAPI:
             return JSONResponse(anthropic_resp)
 
         if mode == "fusion":
-            import json as _json
-            try:
-                fusion_cfg = _json.loads(route.get("fusion_config") or "{}")
-            except (ValueError, TypeError):
-                fusion_cfg = {}
-            judge_alias = fusion_cfg.get("judge_alias", "")
-            if not judge_alias:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail={"type": "invalid_request_error",
-                            "message": "fusion mode requires 'judge_alias' in fusion_config"},
-                )
-            strategy = fusion_cfg.get("strategy", "compare_and_synthesize")
-            min_candidates = int(fusion_cfg.get("min_candidates", 2))
-            timeout_seconds = int(fusion_cfg.get("timeout_seconds", 30))
-
-            candidates = router.resolve_route_auto(alias, group_id=group_id, required_protocol="anthropic")
-            if len(candidates) < min_candidates:
-                msg = (f"fusion requires at least {min_candidates} candidates, "
-                       f"got {len(candidates)} in group '{group_id}'")
-                raise HTTPException(
-                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                    detail={"type": "service_unavailable", "message": msg},
-                )
-
-            orchestrator = FusionOrchestrator(router)
-            try:
-                fusion_result = await orchestrator.fuse(
-                    req, candidates, judge_alias=judge_alias, strategy=strategy,
-                    group_id=group_id, api_key_id=key["key_id"],
-                    min_candidates=min_candidates, timeout_seconds=timeout_seconds,
-                )
-            except UpstreamError as exc:
-                status_code = exc.status_code if exc.status_code and exc.status_code < 500 else 502
-                raise HTTPException(
-                    status_code=status_code,
-                    detail={"type": "upstream_error", "message": str(exc)},
-                )
-            except Exception as exc:
-                logger.error("Fusion error: %s", exc)
-                raise HTTPException(
-                    status_code=status.HTTP_502_BAD_GATEWAY,
-                    detail={"type": "fusion_error", "message": str(exc)},
-                )
-            return JSONResponse(
-                fusion_result["result"],
-                headers={"X-Keyway-Fusion": ",".join(fusion_result["members"]),
-                         "X-Keyway-Fusion-Id": fusion_result["fusion_id"]},
+            # Fusion judge prompts and candidate dispatch are OpenAI-shaped today.
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "type": "invalid_request_error",
+                    "message": (
+                        "fusion mode is only supported on /v1/chat/completions "
+                        "(OpenAI protocol); use an openai-protocol route or switch to "
+                        "auto-select / direct for Anthropic"
+                    ),
+                },
             )
 
         # direct mode (default)

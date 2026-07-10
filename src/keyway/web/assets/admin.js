@@ -204,7 +204,9 @@ async function renderGroupDetail(group_id) {
     loadRouteProviderSelect(),
     loadGroupKeys(),
     loadGroupToolProviders(),
+    loadGroupHealth(),
   ]);
+  hideRouteProvidersPanel();
 }
 
 // ---------- providers ----------
@@ -311,18 +313,30 @@ function bindProviderForm() {
 }
 
 // ---------- routes ----------
+function syncRouteModeFields() {
+  const mode = ($("#route-mode")?.value || "direct");
+  const adapterWrap = $("#route-adapter-wrap");
+  const fusionWrap = $("#route-fusion-wrap");
+  if (adapterWrap) adapterWrap.style.display = mode === "adapter" ? "" : "none";
+  if (fusionWrap) fusionWrap.style.display = mode === "fusion" ? "" : "none";
+}
+
 async function loadGroupRoutes() {
   try {
     const { routes } = await api(`/admin/llm/groups/${encodeURIComponent(currentGroupId)}/routes`);
-    $("#route-list").innerHTML = routes.map(r => `
+    $("#route-list").innerHTML = routes.map(r => {
+      const mode = r.mode || "direct";
+      return `
       <div class="item">
         <span class="id">${esc(r.alias)}</span>
-        <div class="grow"><div class="ellipsis"><strong>${esc(r.provider_id)}</strong> → ${esc(r.upstream_model)} ${r.enabled ? "" : "(disabled)"} ${r.upstream_path ? `[${esc(r.upstream_path)}]` : ""}</div></div>
+        <div class="grow"><div class="ellipsis"><strong>${esc(r.provider_id)}</strong> → ${esc(r.upstream_model)} ${r.enabled ? "" : "(disabled)"} ${r.upstream_path ? `[${esc(r.upstream_path)}]` : ""} <span class="pill mode">${esc(mode)}</span></div></div>
         <button data-action="edit-route" data-rid="${esc(r.route_id)}">Edit</button>
+        <button data-action="manage-rps" data-rid="${esc(r.route_id)}" data-alias="${esc(r.alias)}">Providers</button>
         <button data-action="test-route" data-alias="${esc(r.alias)}">Test</button>
         <button data-action="toggle-route" data-id="${esc(r.route_id)}" data-enabled="${r.enabled ? "1" : "0"}">${r.enabled ? "Disable" : "Enable"}</button>
         <button class="danger" data-action="delete-route" data-id="${esc(r.route_id)}">Delete</button>
-      </div>`).join("") || "";
+      </div>`;
+    }).join("") || "";
   } catch (e) { showOutput("load routes: " + e.message); }
 }
 
@@ -330,9 +344,42 @@ async function loadRouteProviderSelect() {
   try {
     const { providers } = await api(`/admin/llm/groups/${encodeURIComponent(currentGroupId)}/providers`);
     const sel = $("#route-provider-select");
-    sel.innerHTML = providers.map(p =>
+    const options = providers.map(p =>
       `<option value="${esc(p.provider_id)}">${esc(p.provider_id)} — ${esc(p.name)}</option>`).join("");
+    if (sel) sel.innerHTML = options;
+    const rpSel = $("#rp-provider-select");
+    if (rpSel) rpSel.innerHTML = options;
   } catch (e) { showOutput("load providers for select: " + e.message); }
+}
+
+function hideRouteProvidersPanel() {
+  const panel = $("#route-providers-panel");
+  if (panel) panel.style.display = "none";
+  const rid = $("#rp-route-id");
+  if (rid) rid.value = "";
+}
+
+async function showRouteProvidersPanel(routeId, alias) {
+  const panel = $("#route-providers-panel");
+  if (!panel) return;
+  panel.style.display = "";
+  $("#rp-route-id").value = routeId;
+  $("#rp-route-label").textContent = alias ? `(${alias})` : "";
+  await loadRouteProviderSelect();
+  await loadRouteProviders(routeId);
+}
+
+async function loadRouteProviders(routeId) {
+  try {
+    const { route_providers } = await api(`/admin/llm/routes/${encodeURIComponent(routeId)}/providers`);
+    $("#rp-list").innerHTML = route_providers.map(rp => `
+      <div class="item">
+        <span class="id">${esc(rp.provider_id)}</span>
+        <div class="grow"><div class="ellipsis">→ ${esc(rp.upstream_model)} · priority ${rp.priority} ${rp.enabled ? "" : "(disabled)"}</div></div>
+        <button data-action="toggle-rp" data-id="${esc(rp.rp_id)}" data-enabled="${rp.enabled ? "1" : "0"}">${rp.enabled ? "Disable" : "Enable"}</button>
+        <button class="danger" data-action="delete-rp" data-id="${esc(rp.rp_id)}">Remove</button>
+      </div>`).join("") || "";
+  } catch (e) { setStatus($("#rp-status"), e.message, false); }
 }
 
 function resetRouteForm() {
@@ -340,7 +387,11 @@ function resetRouteForm() {
   $("#route-edit-id").value = "";
   $("#route-submit").textContent = "Add Route";
   $("#route-cancel").style.display = "none";
+  if ($("#route-adapter-config")) $("#route-adapter-config").value = "";
+  if ($("#route-fusion-config")) $("#route-fusion-config").value = "";
+  syncRouteModeFields();
   loadRouteProviderSelect();
+  hideRouteProvidersPanel();
 }
 
 async function editRoute(route_id) {
@@ -352,27 +403,41 @@ async function editRoute(route_id) {
     f.elements["provider_id"].value = route.provider_id || "";
     f.elements["upstream_model"].value = route.upstream_model || "";
     f.elements["upstream_path"].value = route.upstream_path || "";
+    f.elements["mode"].value = route.mode || "direct";
     f.elements["enabled"].value = route.enabled ? "1" : "0";
     f.elements["note"].value = route.note || "";
+    if ($("#route-adapter-config")) {
+      $("#route-adapter-config").value = route.adapter_config || "";
+    }
+    if ($("#route-fusion-config")) {
+      $("#route-fusion-config").value = route.fusion_config || "";
+    }
     $("#route-edit-id").value = route.route_id;
     $("#route-submit").textContent = "Save Changes";
     $("#route-cancel").style.display = "";
+    syncRouteModeFields();
+    await showRouteProvidersPanel(route.route_id, route.alias);
   } catch (err) { showOutput("edit route: " + err.message); }
 }
 
 function bindRouteForm() {
   const form = $("#route-form");
   if (!form) return;
+  $("#route-mode")?.addEventListener("change", syncRouteModeFields);
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
     const f = e.target;
     const editId = $("#route-edit-id").value;
     const fd = new FormData(f);
+    const mode = fd.get("mode") || "direct";
+    const adapterConfig = (fd.get("adapter_config") || "").toString().trim() || "{}";
+    const fusionConfig = (fd.get("fusion_config") || "").toString().trim() || "{}";
     if (editId) {
       const body = {
         alias: fd.get("alias"), provider_id: fd.get("provider_id"),
         upstream_model: fd.get("upstream_model"),
         upstream_path: fd.get("upstream_path") || "",
+        mode, adapter_config: adapterConfig, fusion_config: fusionConfig,
         enabled: fd.get("enabled") === "1", note: fd.get("note") || "",
       };
       try {
@@ -386,6 +451,7 @@ function bindRouteForm() {
         alias: fd.get("alias"), provider_id: fd.get("provider_id"),
         upstream_model: fd.get("upstream_model"),
         upstream_path: fd.get("upstream_path") || "",
+        mode, adapter_config: adapterConfig, fusion_config: fusionConfig,
         note: fd.get("note") || "",
       };
       try {
@@ -399,6 +465,61 @@ function bindRouteForm() {
     await loadGroupRoutes();
   });
   $("#route-cancel")?.addEventListener("click", resetRouteForm);
+
+  const rpForm = $("#rp-form");
+  if (rpForm) {
+    rpForm.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const routeId = $("#rp-route-id")?.value;
+      if (!routeId) { setStatus($("#rp-status"), "Select a route first (Edit or Providers)", false); return; }
+      const body = {
+        provider_id: $("#rp-provider-select").value,
+        upstream_model: $("#rp-upstream-model").value,
+        priority: parseInt($("#rp-priority").value || "0", 10) || 0,
+      };
+      try {
+        await api(`/admin/llm/routes/${encodeURIComponent(routeId)}/providers`, {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+        });
+        setStatus($("#rp-status"), "Added", true);
+        $("#rp-upstream-model").value = "";
+        await loadRouteProviders(routeId);
+      } catch (err) { setStatus($("#rp-status"), err.message, false); }
+    });
+  }
+}
+
+// ---------- provider health ----------
+async function loadGroupHealth() {
+  try {
+    const { health } = await api(`/admin/llm/health?group_id=${encodeURIComponent(currentGroupId)}`);
+    const list = $("#health-list");
+    if (!list) return;
+    if (!health || !health.length) {
+      list.innerHTML = "";
+      return;
+    }
+    list.innerHTML = health.map(h => {
+      const open = !!Number(h.circuit_open);
+      return `
+      <div class="item">
+        <span class="id">${esc(h.provider_id)}</span>
+        <div class="grow"><div class="ellipsis">
+          ${open ? '<span class="pill disabled">circuit open</span>' : '<span class="pill enabled">healthy</span>'}
+          · failures ${h.consecutive_fails || 0}
+          ${h.last_fail_at ? ` · last fail ${esc(h.last_fail_at)}` : ""}
+        </div></div>
+        <button data-action="reset-health" data-id="${esc(h.provider_id)}">Reset</button>
+      </div>`;
+    }).join("");
+  } catch (e) { setStatus($("#health-status"), e.message, false); }
+}
+
+function bindHealth() {
+  $("#health-refresh")?.addEventListener("click", async () => {
+    await loadGroupHealth();
+    setStatus($("#health-status"), "Refreshed", true);
+  });
 }
 
 // ---------- keys ----------
@@ -596,6 +717,13 @@ async function runE2e() {
 
 // ---------- init ----------
 (async function init() {
+  // Desktop mode: local app — hide login/logout UI (no auth needed).
+  try {
+    const { config } = await api("/admin/config");
+    if (config && config.desktop_mode) {
+      $("#logout-link")?.style.setProperty("display", "none");
+    }
+  } catch {}
   // Check session
   try {
     await api("/admin/session");
@@ -661,6 +789,8 @@ async function runE2e() {
         await loadGroupProviders();
       } else if (action === "edit-route" && routeId) {
         await editRoute(routeId);
+      } else if (action === "manage-rps" && routeId) {
+        await showRouteProvidersPanel(routeId, alias || "");
       } else if (action === "test-route" && alias) {
         const { test } = await api("/admin/llm/test", {
           method: "POST", headers: { "Content-Type": "application/json" },
@@ -676,7 +806,24 @@ async function runE2e() {
       } else if (action === "delete-route" && id) {
         if (!confirm(`Delete route ${id}?`)) return;
         await api(`/admin/llm/routes/${encodeURIComponent(id)}`, { method: "DELETE" });
+        hideRouteProvidersPanel();
         await loadGroupRoutes();
+      } else if (action === "toggle-rp" && id) {
+        const enabled = btn.dataset.enabled !== "1";
+        await api(`/admin/llm/route-providers/${encodeURIComponent(id)}`, {
+          method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled }),
+        });
+        const rid = $("#rp-route-id")?.value;
+        if (rid) await loadRouteProviders(rid);
+      } else if (action === "delete-rp" && id) {
+        if (!confirm("Remove this route provider?")) return;
+        await api(`/admin/llm/route-providers/${encodeURIComponent(id)}`, { method: "DELETE" });
+        const rid = $("#rp-route-id")?.value;
+        if (rid) await loadRouteProviders(rid);
+      } else if (action === "reset-health" && id) {
+        await api(`/admin/llm/health/${encodeURIComponent(id)}/reset`, { method: "POST" });
+        await loadGroupHealth();
+        setStatus($("#health-status"), `Reset ${id}`, true);
       } else if (action === "delete-key" && id) {
         if (!confirm("Delete this key? Clients using it will get 401 immediately.")) return;
         await api(`/admin/llm/keys/${encodeURIComponent(id)}`, { method: "DELETE" });
@@ -712,7 +859,9 @@ async function runE2e() {
   bindRouteForm();
   bindKeyForm();
   bindToolForm();
+  bindHealth();
   bindLogs();
+  syncRouteModeFields();
   $("#e2e-run")?.addEventListener("click", runE2e);
   $("#logout-link")?.addEventListener("click", async (e) => {
     e.preventDefault();
@@ -724,33 +873,89 @@ async function runE2e() {
 })();
 
 async function newGroupFlow() {
-  const gid = prompt("New group_id (slug, alphanumeric + _-):");
-  if (!gid) return;
-  let existing = cachedGroups.find(g => g.group_id === gid);
-  if (!existing) {
+  const overlay = $("#group-modal");
+  const gidInput = $("#gm-gid");
+  const nameInput = $("#gm-name");
+  const errEl = $("#gm-error");
+  const createBtn = $("#gm-create");
+  const cancelBtn = $("#gm-cancel");
+  if (!overlay || !gidInput || !nameInput || !createBtn || !cancelBtn) return;
+
+  // Reset state and show
+  gidInput.value = "";
+  nameInput.value = "";
+  errEl.textContent = "";
+  createBtn.disabled = false;
+  createBtn.textContent = "Create Group";
+  overlay.classList.add("open");
+  gidInput.focus();
+
+  let closing = false;
+  const close = () => { overlay.classList.remove("open"); cleanup(); };
+  const showError = (msg) => { errEl.textContent = msg; };
+
+  async function submit() {
+    const gid = gidInput.value.trim();
+    const name = nameInput.value.trim() || gid;
+    if (!gid) { showError("Group ID is required."); gidInput.focus(); return; }
+    if (!/^[a-z0-9._-]{1,64}$/i.test(gid)) {
+      showError("ID must be 1–64 chars: letters, digits, . _ or -.");
+      gidInput.focus();
+      return;
+    }
+    // Check cache first, then refresh from server to avoid stale duplicates.
+    if (cachedGroups.some(g => g.group_id === gid)) {
+      try {
+        const { groups } = await api("/admin/llm/groups");
+        cachedGroups = groups || [];
+      } catch {}
+      const existing = cachedGroups.find(g => g.group_id === gid);
+      if (existing) {
+        showError(`"${gid}" already exists (${existing.name || "unnamed"}). Choose another.`);
+        return;
+      }
+    }
+    createBtn.disabled = true;
+    createBtn.textContent = "Creating…";
     try {
-      const { groups } = await api("/admin/llm/groups");
-      cachedGroups = groups || [];
-      existing = cachedGroups.find(g => g.group_id === gid);
-    } catch {}
+      await api("/admin/llm/groups", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ group_id: gid, name }),
+      });
+      await renderGroupList();
+      close();
+    } catch (err) {
+      const msg = /409|already exists/i.test(err.message)
+        ? `"${gid}" already exists.`
+        : "Create failed: " + err.message;
+      showError(msg);
+    } finally {
+      createBtn.disabled = false;
+      createBtn.textContent = "Create Group";
+    }
   }
-  if (existing) {
-    alert(`group_id "${gid}" already exists (group: ${existing.name}). Choose another or delete it first.`);
-    return;
+
+  function onKey(e) {
+    if (e.key === "Escape") { e.preventDefault(); close(); }
+    else if (e.key === "Enter" && (e.target === gidInput || e.target === nameInput)) {
+      e.preventDefault();
+      submit();
+    }
   }
-  const name = prompt("Group name:") || gid;
-  try {
-    await api("/admin/llm/groups", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ group_id: gid, name }),
-    });
-    await renderGroupList();
-  } catch (err) {
-    const msg = /409|already exists/i.test(err.message)
-      ? `group_id "${gid}" already exists.`
-      : "Create failed: " + err.message;
-    alert(msg);
+  function onOverlayClick(e) { if (e.target === overlay) close(); }
+
+  function cleanup() {
+    createBtn.removeEventListener("click", submit);
+    cancelBtn.removeEventListener("click", close);
+    gidInput.removeEventListener("keydown", onKey);
+    nameInput.removeEventListener("keydown", onKey);
+    overlay.removeEventListener("click", onOverlayClick);
   }
+  createBtn.addEventListener("click", submit);
+  cancelBtn.addEventListener("click", close);
+  gidInput.addEventListener("keydown", onKey);
+  nameInput.addEventListener("keydown", onKey);
+  overlay.addEventListener("click", onOverlayClick);
 }
 
 async function renameGroupFlow() {
