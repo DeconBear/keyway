@@ -171,7 +171,7 @@ class LLMRouter:
             "Content-Type": "application/json",
         }
         body = {**body, "model": model, "stream": True}
-        async with httpx.AsyncClient(timeout=httpx.Timeout(connect=10, read=300, write=30, pool=10)) as client:
+        async with httpx.AsyncClient(trust_env=False, timeout=httpx.Timeout(connect=10, read=300, write=30, pool=10)) as client:
             async with client.stream("POST", url, json=body, headers=headers) as resp:
                 if resp.status_code >= 400:
                     body_bytes = await resp.aread()
@@ -191,7 +191,7 @@ class LLMRouter:
             "Content-Type": "application/json",
         }
         body = {**body, "model": model, "stream": False}
-        async with httpx.AsyncClient(timeout=httpx.Timeout(connect=10, read=300, write=30, pool=10)) as client:
+        async with httpx.AsyncClient(trust_env=False, timeout=httpx.Timeout(connect=10, read=300, write=30, pool=10)) as client:
             resp = await client.post(url, json=body, headers=headers)
         if resp.status_code >= 400:
             raise UpstreamError(f"upstream {resp.status_code}: {resp.text[:300]}", status_code=resp.status_code)
@@ -225,7 +225,7 @@ class LLMRouter:
             "content-type": "application/json",
         }
         body = {**body, "stream": True}
-        async with httpx.AsyncClient(timeout=httpx.Timeout(connect=10, read=300, write=30, pool=10)) as client:
+        async with httpx.AsyncClient(trust_env=False, timeout=httpx.Timeout(connect=10, read=300, write=30, pool=10)) as client:
             async with client.stream("POST", url, json=body, headers=headers) as resp:
                 if resp.status_code >= 400:
                     body_bytes = await resp.aread()
@@ -246,7 +246,7 @@ class LLMRouter:
             "content-type": "application/json",
         }
         body = {**body, "stream": False}
-        async with httpx.AsyncClient(timeout=httpx.Timeout(connect=10, read=300, write=30, pool=10)) as client:
+        async with httpx.AsyncClient(trust_env=False, timeout=httpx.Timeout(connect=10, read=300, write=30, pool=10)) as client:
             resp = await client.post(url, json=body, headers=headers)
         if resp.status_code >= 400:
             raise UpstreamError(f"upstream {resp.status_code}: {resp.text[:300]}", status_code=resp.status_code)
@@ -293,7 +293,7 @@ class LLMRouter:
 
         start = time.time()
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(connect=10, read=300, write=30, pool=10)) as client:
+            async with httpx.AsyncClient(trust_env=False, timeout=httpx.Timeout(connect=10, read=300, write=30, pool=10)) as client:
                 resp = await client.post(url, json=forward_body, headers=headers)
             if resp.status_code >= 400:
                 raise UpstreamError(f"upstream {resp.status_code}: {resp.text[:300]}", status_code=resp.status_code)
@@ -376,7 +376,7 @@ class LLMRouter:
             return await _try_chat(upstream_model)
 
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(connect=10, read=30, write=10, pool=5)) as client:
+            async with httpx.AsyncClient(trust_env=False, timeout=httpx.Timeout(connect=10, read=30, write=10, pool=5)) as client:
                 resp = await client.get(base + "/models", headers=openai_headers or anthropic_headers)
             if resp.status_code < 400:
                 result["ok"] = True

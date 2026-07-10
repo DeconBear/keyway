@@ -50,7 +50,7 @@ BUILTIN_TOOLS: dict[str, dict[str, Any]] = {
 
 
 async def _tavily_search(query: str, api_key: str, max_results: int = 5) -> dict[str, Any]:
-    async with httpx.AsyncClient(timeout=30) as client:
+    async with httpx.AsyncClient(trust_env=False, timeout=30) as client:
         resp = await client.post(
             "https://api.tavily.com/search",
             json={
