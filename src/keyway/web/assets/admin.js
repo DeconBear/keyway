@@ -91,6 +91,50 @@ async function render() {
 
 window.addEventListener("hashchange", render);
 
+// ---------- gateway overview (home) ----------
+async function loadOverview() {
+  const summary = $("#overview-summary");
+  const errors = $("#overview-errors");
+  if (!summary || !errors) return;
+  try {
+    const healthResp = await fetch("/health");
+    const healthOk = healthResp.ok;
+    const { overview } = await api("/admin/llm/overview");
+    const circuits = overview.open_circuits || 0;
+    const circuitLabel = circuits
+      ? `<span class="pill disabled">${circuits} circuit open</span> ${esc((overview.circuit_providers || []).join(", "))}`
+      : `<span class="pill enabled">circuits ok</span>`;
+    summary.innerHTML = `
+      <div>${healthOk ? '<span class="pill enabled">server ok</span>' : '<span class="pill disabled">server down</span>'}</div>
+      <div>${overview.desktop_mode ? '<span class="pill mode">desktop</span>' : '<span class="pill mode">server</span>'}</div>
+      <div><span class="pill default">${esc(overview.groups || 0)} groups</span></div>
+      <div>${circuitLabel}</div>
+      <div style="color:var(--muted);font-size:0.78rem;font-family:'IBM Plex Mono',monospace;">${esc(overview.data_dir || "")}</div>
+    `;
+    const errs = overview.recent_errors || [];
+    if (!errs.length) {
+      errors.innerHTML = `<div class="item" style="color:var(--muted);">No recent upstream errors</div>`;
+    } else {
+      errors.innerHTML = errs.map(e => `
+        <div class="item">
+          <span class="id">${esc((e.created_at || "").replace("T", " ").slice(0, 19))}</span>
+          <div class="grow"><div class="ellipsis"><strong>${esc(e.route_alias || "—")}</strong> · ${esc(e.provider_id || "—")} · status ${esc(e.status_code || "—")}</div>
+          <div class="ellipsis" style="color:var(--err);font-size:0.78rem;">${esc(e.error || "")}</div></div>
+        </div>`).join("");
+    }
+  } catch (e) {
+    summary.innerHTML = `<div class="status err">Overview failed: ${esc(e.message)}</div>`;
+    errors.innerHTML = "";
+  }
+}
+
+function bindOverview() {
+  $("#overview-refresh")?.addEventListener("click", async () => {
+    await loadOverview();
+    setStatus($("#overview-status"), "Refreshed", true);
+  });
+}
+
 // ---------- group list view ----------
 async function renderGroupList() {
   currentGroupId = null;
@@ -99,6 +143,7 @@ async function renderGroupList() {
   if (!main) return;
   if (detail) detail.style.display = "none";
   main.style.display = "";
+  await loadOverview();
 
   let groups = [];
   try {
@@ -321,6 +366,61 @@ function syncRouteModeFields() {
   if (fusionWrap) fusionWrap.style.display = mode === "fusion" ? "" : "none";
 }
 
+function parseJsonSafe(raw, fallback) {
+  try {
+    return JSON.parse(raw || "{}");
+  } catch (_) {
+    return fallback || {};
+  }
+}
+
+function syncAdapterFieldsFromJson() {
+  const cfg = parseJsonSafe($("#route-adapter-config")?.value, {});
+  if ($("#adapter-vision-alias")) $("#adapter-vision-alias").value = cfg.vision_alias || "";
+  if ($("#adapter-fallback")) $("#adapter-fallback").value = cfg.fallback || "error";
+}
+
+function syncFusionFieldsFromJson() {
+  const cfg = parseJsonSafe($("#route-fusion-config")?.value, {});
+  if ($("#fusion-judge-alias")) $("#fusion-judge-alias").value = cfg.judge_alias || "";
+  if ($("#fusion-strategy")) $("#fusion-strategy").value = cfg.strategy || "compare_and_synthesize";
+  if ($("#fusion-min-candidates")) $("#fusion-min-candidates").value = cfg.min_candidates ?? 2;
+  if ($("#fusion-timeout")) $("#fusion-timeout").value = cfg.timeout_seconds ?? 30;
+}
+
+function buildAdapterConfigJson() {
+  const existing = parseJsonSafe($("#route-adapter-config")?.value, {});
+  existing.vision_alias = ($("#adapter-vision-alias")?.value || "").trim();
+  existing.fallback = $("#adapter-fallback")?.value || "error";
+  if (!existing.vision_alias) delete existing.vision_alias;
+  const json = JSON.stringify(existing);
+  if ($("#route-adapter-config")) $("#route-adapter-config").value = json;
+  return json;
+}
+
+function buildFusionConfigJson() {
+  const existing = parseJsonSafe($("#route-fusion-config")?.value, {});
+  existing.judge_alias = ($("#fusion-judge-alias")?.value || "").trim();
+  existing.strategy = $("#fusion-strategy")?.value || "compare_and_synthesize";
+  existing.min_candidates = parseInt($("#fusion-min-candidates")?.value || "2", 10) || 2;
+  existing.timeout_seconds = parseInt($("#fusion-timeout")?.value || "30", 10) || 30;
+  if (!existing.judge_alias) delete existing.judge_alias;
+  const json = JSON.stringify(existing);
+  if ($("#route-fusion-config")) $("#route-fusion-config").value = json;
+  return json;
+}
+
+function clearAdapterFusionFields() {
+  if ($("#adapter-vision-alias")) $("#adapter-vision-alias").value = "";
+  if ($("#adapter-fallback")) $("#adapter-fallback").value = "error";
+  if ($("#fusion-judge-alias")) $("#fusion-judge-alias").value = "";
+  if ($("#fusion-strategy")) $("#fusion-strategy").value = "compare_and_synthesize";
+  if ($("#fusion-min-candidates")) $("#fusion-min-candidates").value = "2";
+  if ($("#fusion-timeout")) $("#fusion-timeout").value = "30";
+  if ($("#route-adapter-config")) $("#route-adapter-config").value = "";
+  if ($("#route-fusion-config")) $("#route-fusion-config").value = "";
+}
+
 async function loadGroupRoutes() {
   try {
     const { routes } = await api(`/admin/llm/groups/${encodeURIComponent(currentGroupId)}/routes`);
@@ -387,8 +487,7 @@ function resetRouteForm() {
   $("#route-edit-id").value = "";
   $("#route-submit").textContent = "Add Route";
   $("#route-cancel").style.display = "none";
-  if ($("#route-adapter-config")) $("#route-adapter-config").value = "";
-  if ($("#route-fusion-config")) $("#route-fusion-config").value = "";
+  clearAdapterFusionFields();
   syncRouteModeFields();
   loadRouteProviderSelect();
   hideRouteProvidersPanel();
@@ -412,6 +511,8 @@ async function editRoute(route_id) {
     if ($("#route-fusion-config")) {
       $("#route-fusion-config").value = route.fusion_config || "";
     }
+    syncAdapterFieldsFromJson();
+    syncFusionFieldsFromJson();
     $("#route-edit-id").value = route.route_id;
     $("#route-submit").textContent = "Save Changes";
     $("#route-cancel").style.display = "";
@@ -424,14 +525,16 @@ function bindRouteForm() {
   const form = $("#route-form");
   if (!form) return;
   $("#route-mode")?.addEventListener("change", syncRouteModeFields);
+  $("#route-adapter-config")?.addEventListener("change", syncAdapterFieldsFromJson);
+  $("#route-fusion-config")?.addEventListener("change", syncFusionFieldsFromJson);
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
     const f = e.target;
     const editId = $("#route-edit-id").value;
     const fd = new FormData(f);
     const mode = fd.get("mode") || "direct";
-    const adapterConfig = (fd.get("adapter_config") || "").toString().trim() || "{}";
-    const fusionConfig = (fd.get("fusion_config") || "").toString().trim() || "{}";
+    const adapterConfig = buildAdapterConfigJson() || "{}";
+    const fusionConfig = buildFusionConfigJson() || "{}";
     if (editId) {
       const body = {
         alias: fd.get("alias"), provider_id: fd.get("provider_id"),
@@ -861,6 +964,7 @@ async function runE2e() {
   bindToolForm();
   bindHealth();
   bindLogs();
+  bindOverview();
   syncRouteModeFields();
   $("#e2e-run")?.addEventListener("click", runE2e);
   $("#logout-link")?.addEventListener("click", async (e) => {

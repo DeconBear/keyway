@@ -1,9 +1,8 @@
 """Adapter pipeline for multimodal-to-text pre-processing.
 
-When a route is in ``adapter`` mode, the pipeline detects image content
-in the request, calls a separate vision-capable model route to generate
-a text description, and replaces the image blocks with that text before
-forwarding the (now text-only) request to the target text model.
+When a route is in ``adapter`` mode, the pipeline detects image / tool
+content in the request, optionally calls a vision model for images, and
+flattens tool results to text before forwarding to a text-only model.
 """
 
 from __future__ import annotations
@@ -146,6 +145,86 @@ class ImageDescriber:
         return ""
 
 
+class ToolResultFlattener:
+    """Flatten tool-result messages/blocks into plain text for text-only models.
+
+    - OpenAI: ``role: tool`` messages → ``role: user`` with ``[Tool result: …]``
+    - Anthropic: ``type: tool_result`` content blocks → ``type: text`` blocks
+    """
+
+    @staticmethod
+    def adapt(req_body: dict[str, Any]) -> dict[str, Any]:
+        messages = req_body.get("messages") or []
+        if not messages:
+            return req_body
+
+        new_messages: list[dict[str, Any]] = []
+        for msg in messages:
+            if not isinstance(msg, dict):
+                new_messages.append(msg)
+                continue
+
+            if msg.get("role") == "tool":
+                text = ToolResultFlattener._openai_tool_text(msg)
+                new_messages.append({"role": "user", "content": text})
+                continue
+
+            content = msg.get("content")
+            if isinstance(content, list):
+                new_blocks: list[dict[str, Any]] = []
+                changed = False
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "tool_result":
+                        new_blocks.append({
+                            "type": "text",
+                            "text": ToolResultFlattener._anthropic_tool_text(block),
+                        })
+                        changed = True
+                    else:
+                        new_blocks.append(block)
+                if changed:
+                    msg = {**msg, "content": new_blocks}
+            new_messages.append(msg)
+
+        out = dict(req_body)
+        out["messages"] = new_messages
+        return out
+
+    @staticmethod
+    def _openai_tool_text(msg: dict[str, Any]) -> str:
+        tool_call_id = msg.get("tool_call_id") or msg.get("name") or ""
+        content = msg.get("content", "")
+        if isinstance(content, list):
+            parts = []
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    parts.append(block.get("text", ""))
+                elif isinstance(block, str):
+                    parts.append(block)
+            content = " ".join(parts)
+        elif not isinstance(content, str):
+            content = json.dumps(content, ensure_ascii=False)
+        prefix = f"tool_call_id={tool_call_id}" if tool_call_id else "tool"
+        return f"[Tool result ({prefix}): {content}]"
+
+    @staticmethod
+    def _anthropic_tool_text(block: dict[str, Any]) -> str:
+        tool_use_id = block.get("tool_use_id") or ""
+        content = block.get("content", "")
+        if isinstance(content, list):
+            parts = []
+            for b in content:
+                if isinstance(b, dict) and b.get("type") == "text":
+                    parts.append(b.get("text", ""))
+                elif isinstance(b, str):
+                    parts.append(b)
+            content = " ".join(parts)
+        elif not isinstance(content, str):
+            content = json.dumps(content, ensure_ascii=False)
+        prefix = f"tool_use_id={tool_use_id}" if tool_use_id else "tool"
+        return f"[Tool result ({prefix}): {content}]"
+
+
 class AdapterPipeline:
     """Orchestrates modality detection and pre-processing adapters.
 
@@ -170,10 +249,14 @@ class AdapterPipeline:
     async def adapt(self, req_body: dict[str, Any], group_id: str = "") -> dict[str, Any]:
         """Detect modalities and apply the appropriate adapters.
 
-        Only adapts when the request contains images and a vision_alias
-        is configured. Returns the (possibly modified) request body.
+        Flattens tool results always. Adapts images when a vision_alias
+        is configured (or strips them on skip-image fallback).
         """
         modalities = ModalityDetector.detect(req_body)
+
+        if "tool_result" in modalities:
+            req_body = ToolResultFlattener.adapt(req_body)
+
         if "image" not in modalities:
             return req_body
 

@@ -43,6 +43,17 @@ cp .env.example .env   # edit: set KEYWAY_SECRET (required) and KEYWAY_ADMIN_TOK
 python -m keyway
 ```
 
+### Desktop app (Windows)
+
+```bash
+pip install -e ".[dev]"
+pip install -r keyway-desktop/requirements.txt
+python keyway-desktop/main.py
+# or: cd keyway-desktop && pyinstaller Keyway.spec  → dist/Keyway.exe
+```
+
+Data and secrets persist under `%APPDATA%\Keyway`. See [keyway-desktop/README.md](keyway-desktop/README.md).
+
 ## Next Steps
 
 - **First-time setup** (add providers, routes, keys): see [Getting Started](tutorial/getting-started.md)

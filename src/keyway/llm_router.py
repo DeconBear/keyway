@@ -25,9 +25,9 @@ import httpx
 
 from .llm_store import LLMStore
 from .llm_tools import (
-    BUILTIN_TOOLS,
     execute_tool,
     parse_tool_arguments,
+    schemas_for_enabled,
 )
 
 
@@ -133,18 +133,18 @@ class LLMRouter:
     def get_tool_definitions(self, group_id: str = "") -> list[dict[str, Any]]:
         """Return builtin tool schemas to inject into OpenAI calls.
 
-        Only schemas whose ``tool_id`` has an enabled, keyed provider in the
-        (optional) group are returned. Empty enabled set → no tools.
+        Keyless tools are always included. Keyed tools (e.g. tavily) are
+        included only when an enabled provider row with an API key exists.
         """
         if group_id:
             rows = self.store.list_tool_providers_in_group(group_id=group_id)
         else:
             rows = self.store.list_tool_providers()
-        enabled_ids = {
+        enabled_keyed = {
             p["tool_id"] for p in rows
             if p.get("enabled") and p.get("api_key_set")
         }
-        return [schema for tid, schema in BUILTIN_TOOLS.items() if tid in enabled_ids]
+        return schemas_for_enabled(enabled_keyed, include_keyless=True)
 
     def _tool_providers_map(self, group_id: str = "") -> dict[str, dict[str, Any]]:
         """Build ``{tool_id: provider_row_with_decrypted_api_key}`` for execute_tool."""
@@ -421,6 +421,8 @@ class LLMRouter:
         protocol: str | None = None,
         resolved: tuple[dict[str, Any], dict[str, Any]] | None = None,
         fusion_id: str | None = None,
+        *,
+        raise_connect_errors: bool = False,
     ) -> AsyncGenerator[bytes, None]:
         if resolved is None:
             alias = req_body.get("model", "")
@@ -444,14 +446,16 @@ class LLMRouter:
         req_tokens = 0
         resp_tokens = 0
         error_msg = ""
+        yielded = False
         try:
             proto = provider.get("protocol") or "openai"
             if proto == "anthropic":
-                async for chunk in self._call_upstream_anthropic_stream(provider, body):
-                    yield chunk
+                agen = self._call_upstream_anthropic_stream(provider, body)
             else:
-                async for chunk in self._call_upstream_stream(provider, upstream_model, body):
-                    yield chunk
+                agen = self._call_upstream_stream(provider, upstream_model, body)
+            async for chunk in agen:
+                yielded = True
+                yield chunk
             status_code = 200
         except UpstreamError as exc:
             error_msg = f"{type(exc).__name__}: {exc}"
@@ -459,6 +463,10 @@ class LLMRouter:
             if exc.retryable:
                 self.store.record_provider_failure(provider.get("provider_id", ""),
                                                    provider.get("group_id") or "")
+            if raise_connect_errors and not yielded:
+                # Allow auto-select to try the next candidate before any bytes
+                # have been committed to the client.
+                raise
             err = {"error": {"message": error_msg, "type": "router_error"}}
             try:
                 yield f"data: {json.dumps(err)}\n\n".encode("utf-8")
@@ -467,6 +475,8 @@ class LLMRouter:
                 pass
         except Exception as exc:
             error_msg = f"{type(exc).__name__}: {exc}"
+            if raise_connect_errors and not yielded:
+                raise UpstreamError(error_msg, status_code=502) from exc
             err = {"error": {"message": error_msg, "type": "router_error"}}
             try:
                 yield f"data: {json.dumps(err)}\n\n".encode("utf-8")
@@ -619,10 +629,9 @@ class LLMRouter:
     ) -> AsyncGenerator[bytes, None]:
         """Stream from the highest-priority healthy candidate.
 
-        Streaming failover is limited: once bytes have been sent to the
-        client we cannot retry on a mid-stream failure. We stream from the
-        first candidate; the underlying ``stream`` method formats upstream
-        errors as SSE events for the client.
+        Failover is allowed **before the first byte** is sent to the client
+        (connect / upstream 5xx). Once streaming has started, mid-stream
+        failures are forwarded as SSE errors and not retried.
         """
         if not candidates:
             err = {
@@ -632,13 +641,30 @@ class LLMRouter:
             yield f"data: {json.dumps(err)}\n\n".encode("utf-8")
             yield b"data: [DONE]\n\n"
             return
-        route, provider, upstream_model = candidates[0]
-        resolved = self._resolved_with_model(route, provider, upstream_model)
-        body = dict(req_body)
-        async for chunk in self.stream(
-            body, api_key_id=api_key_id, protocol=protocol, resolved=resolved,
-        ):
-            yield chunk
+
+        last_exc: Exception | None = None
+        for route, provider, upstream_model in candidates:
+            resolved = self._resolved_with_model(route, provider, upstream_model)
+            body = dict(req_body)
+            try:
+                async for chunk in self.stream(
+                    body, api_key_id=api_key_id, protocol=protocol, resolved=resolved,
+                    raise_connect_errors=True,
+                ):
+                    yield chunk
+                return
+            except UpstreamError as exc:
+                last_exc = exc
+                if not exc.retryable:
+                    err = {"error": {"message": str(exc), "type": "router_error"}}
+                    yield f"data: {json.dumps(err)}\n\n".encode("utf-8")
+                    yield b"data: [DONE]\n\n"
+                    return
+                continue
+        msg = str(last_exc) if last_exc else "all candidates failed"
+        err = {"error": {"message": msg, "type": "router_error"}}
+        yield f"data: {json.dumps(err)}\n\n".encode("utf-8")
+        yield b"data: [DONE]\n\n"
 
     # -------- models list --------
     def list_models(self, group_id: str | None = None) -> dict[str, Any]:

@@ -116,6 +116,16 @@
             <button data-action="new-group" type="button">+ New Group</button>
           </div>
         </div>
+        <section class="section" id="overview" style="margin-bottom:1.25rem;">
+          <h2>Gateway Status</h2>
+          <p class="meta">Server health, open circuits, and recent upstream errors at a glance.</p>
+          <div id="overview-summary" style="display:flex;flex-wrap:wrap;gap:0.75rem;margin-bottom:0.75rem;font-size:0.85rem;"></div>
+          <div id="overview-errors" class="list"></div>
+          <div style="margin-top:0.5rem;">
+            <button type="button" id="overview-refresh" style="padding:0.35rem 0.75rem;font-size:0.82rem;border:1px solid var(--border);border-radius:5px;background:var(--card);color:var(--text);cursor:pointer;">Refresh</button>
+            <span id="overview-status" class="status"></span>
+          </div>
+        </section>
         <div id="group-list" class="list"></div>
       </div>
 
@@ -170,12 +180,39 @@
             <div><label>Enabled</label><select name="enabled"><option value="1">Yes</option><option value="0">No</option></select></div>
             <div class="full"><label>Upstream Path (for generation endpoints)</label><input name="upstream_path" placeholder="services/aigc/text2image/image-synthesis" /></div>
             <div class="full" id="route-adapter-wrap" style="display:none;">
-              <label>Adapter Config (JSON)</label>
-              <textarea name="adapter_config" id="route-adapter-config" placeholder='{"vision_alias":"qwen-vl","fallback":"error"}'></textarea>
+              <label>Adapter Config</label>
+              <div class="form" style="grid-template-columns: 1fr 1fr; gap: 0.5rem; margin-top: 0.35rem;">
+                <div><label>Vision Alias</label><input id="adapter-vision-alias" placeholder="qwen-vl" /></div>
+                <div><label>Fallback</label>
+                  <select id="adapter-fallback">
+                    <option value="error" selected>error</option>
+                    <option value="skip-image">skip-image</option>
+                  </select>
+                </div>
+              </div>
+              <details style="margin-top:0.4rem;">
+                <summary class="meta" style="cursor:pointer;">Advanced JSON</summary>
+                <textarea name="adapter_config" id="route-adapter-config" placeholder='{"vision_alias":"qwen-vl","fallback":"error"}'></textarea>
+              </details>
             </div>
             <div class="full" id="route-fusion-wrap" style="display:none;">
-              <label>Fusion Config (JSON)</label>
-              <textarea name="fusion_config" id="route-fusion-config" placeholder='{"judge_alias":"judge","strategy":"compare_and_synthesize","min_candidates":2}'></textarea>
+              <label>Fusion Config</label>
+              <div class="form" style="grid-template-columns: 1fr 1fr; gap: 0.5rem; margin-top: 0.35rem;">
+                <div><label>Judge Alias</label><input id="fusion-judge-alias" placeholder="judge" /></div>
+                <div><label>Strategy</label>
+                  <select id="fusion-strategy">
+                    <option value="compare_and_synthesize" selected>compare_and_synthesize</option>
+                    <option value="majority_vote">majority_vote</option>
+                    <option value="ranked">ranked</option>
+                  </select>
+                </div>
+                <div><label>Min Candidates</label><input id="fusion-min-candidates" type="number" value="2" min="1" /></div>
+                <div><label>Timeout (seconds)</label><input id="fusion-timeout" type="number" value="30" min="1" /></div>
+              </div>
+              <details style="margin-top:0.4rem;">
+                <summary class="meta" style="cursor:pointer;">Advanced JSON</summary>
+                <textarea name="fusion_config" id="route-fusion-config" placeholder='{"judge_alias":"judge","strategy":"compare_and_synthesize","min_candidates":2}'></textarea>
+              </details>
             </div>
             <div class="full"><label>Note (optional)</label><input name="note" /></div>
             <div class="actions">

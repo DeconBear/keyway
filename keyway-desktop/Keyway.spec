@@ -26,7 +26,7 @@ _datas.extend(_web_files)
 
 _a = Analysis(
     [str(Path(SPECPATH) / "main.py")],
-    pathex=[],
+    pathex=[str(Path(SPECPATH).resolve().parent / "src")],
     binaries=[],
     datas=_datas,
     hiddenimports=[
@@ -42,6 +42,8 @@ _a = Analysis(
         "keyway.modality",
         "keyway.adapters",
         "keyway.fusion",
+        "paths",
+        "server",
         "uvicorn",
         "uvicorn.loops",
         "uvicorn.loops.auto",

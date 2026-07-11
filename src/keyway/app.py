@@ -260,12 +260,11 @@ def create_app() -> FastAPI:
 
     @app.get("/admin/desktop-login")
     def admin_desktop_login(
-        token: str = Query(...), request: Request = None, response: Response = None,
+        request: Request,
+        token: str = Query(...),
     ) -> Response:
         """Desktop auto-login: validate token, set session cookie, redirect to admin.html."""
         from fastapi.responses import RedirectResponse
-        if not request or not response:
-            raise HTTPException(status_code=500, detail="Internal error")
         if token != request.app.state.admin_token:
             return RedirectResponse("/")
         session_token = request.app.state.sessions.create()
@@ -534,6 +533,36 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"route-provider not found: {rp_id}")
         return {"ok": True, "message": f"route-provider deleted: {rp_id}"}
 
+    @app.get("/admin/llm/overview")
+    def admin_llm_overview(request: Request, _admin: dict = Depends(_require_admin)) -> dict:
+        """Compact ops snapshot: circuits + recent errors for the admin home."""
+        health = llm_store.list_provider_health()
+        open_rows = [h for h in health if int(h.get("circuit_open") or 0)]
+        logs = llm_store.list_logs(limit=40)
+        recent_errors = [
+            {
+                "created_at": l.get("created_at"),
+                "route_alias": l.get("route_alias"),
+                "provider_id": l.get("provider_id"),
+                "status_code": l.get("status_code"),
+                "error": (l.get("error") or "")[:200],
+                "latency_ms": l.get("latency_ms"),
+            }
+            for l in logs
+            if (l.get("status_code") or 0) >= 400 or (l.get("error") or "").strip()
+        ][:8]
+        return {
+            "ok": True,
+            "overview": {
+                "desktop_mode": bool(getattr(request.app.state, "desktop_mode", False)),
+                "data_dir": str(request.app.state.settings.data_dir),
+                "groups": len(llm_store.list_groups()),
+                "open_circuits": len(open_rows),
+                "circuit_providers": [h.get("provider_id") for h in open_rows],
+                "recent_errors": recent_errors,
+            },
+        }
+
     # ==================== Admin: provider health (circuit breaker) ====================
 
     @app.get("/admin/llm/health")
@@ -796,7 +825,7 @@ def create_app() -> FastAPI:
                 adapter_cfg = _json.loads(route.get("adapter_config") or "{}")
             except (ValueError, TypeError):
                 adapter_cfg = {}
-            if ModalityDetector.has_image(body):
+            if ModalityDetector.needs_adaptation(body):
                 pipeline = AdapterPipeline(router, adapter_cfg)
                 try:
                     body = await pipeline.adapt(body, group_id=group_id)
@@ -857,6 +886,7 @@ def create_app() -> FastAPI:
                     body, candidates, judge_alias=judge_alias, strategy=strategy,
                     group_id=group_id, api_key_id=key["key_id"],
                     min_candidates=min_candidates, timeout_seconds=timeout_seconds,
+                    protocol="openai",
                 )
             except UpstreamError as exc:
                 status_code = exc.status_code if exc.status_code and exc.status_code < 500 else 502
@@ -979,7 +1009,7 @@ def create_app() -> FastAPI:
                 adapter_cfg = _json.loads(route.get("adapter_config") or "{}")
             except (ValueError, TypeError):
                 adapter_cfg = {}
-            if ModalityDetector.has_image(req):
+            if ModalityDetector.needs_adaptation(req):
                 pipeline = AdapterPipeline(router, adapter_cfg)
                 try:
                     req = await pipeline.adapt(req, group_id=group_id)
@@ -1036,17 +1066,59 @@ def create_app() -> FastAPI:
             return JSONResponse(anthropic_resp)
 
         if mode == "fusion":
-            # Fusion judge prompts and candidate dispatch are OpenAI-shaped today.
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail={
-                    "type": "invalid_request_error",
-                    "message": (
-                        "fusion mode is only supported on /v1/chat/completions "
-                        "(OpenAI protocol); use an openai-protocol route or switch to "
-                        "auto-select / direct for Anthropic"
-                    ),
-                },
+            import json as _json
+            try:
+                fusion_cfg = _json.loads(route.get("fusion_config") or "{}")
+            except (ValueError, TypeError):
+                fusion_cfg = {}
+            judge_alias = fusion_cfg.get("judge_alias", "")
+            if not judge_alias:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        "type": "invalid_request_error",
+                        "message": "fusion mode requires 'judge_alias' in fusion_config",
+                    },
+                )
+            strategy = fusion_cfg.get("strategy", "compare_and_synthesize")
+            min_candidates = int(fusion_cfg.get("min_candidates", 2))
+            timeout_seconds = int(fusion_cfg.get("timeout_seconds", 30))
+
+            candidates = router.resolve_route_auto(
+                alias, group_id=group_id, required_protocol="anthropic",
+            )
+            if len(candidates) < min_candidates:
+                msg = (f"fusion requires at least {min_candidates} candidates, "
+                       f"got {len(candidates)} in group '{group_id}'")
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail={"type": "service_unavailable", "message": msg},
+                )
+
+            orchestrator = FusionOrchestrator(router)
+            try:
+                fusion_result = await orchestrator.fuse(
+                    req, candidates, judge_alias=judge_alias, strategy=strategy,
+                    group_id=group_id, api_key_id=key["key_id"],
+                    min_candidates=min_candidates, timeout_seconds=timeout_seconds,
+                    protocol="anthropic",
+                )
+            except UpstreamError as exc:
+                status_code = exc.status_code if exc.status_code and exc.status_code < 500 else 502
+                raise HTTPException(
+                    status_code=status_code,
+                    detail={"type": "upstream_error", "message": str(exc)},
+                )
+            except Exception as exc:
+                logger.error("Anthropic fusion error: %s", exc)
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail={"type": "fusion_error", "message": f"fusion error: {exc}"},
+                )
+            return JSONResponse(
+                fusion_result["result"],
+                headers={"X-Keyway-Fusion": ",".join(fusion_result["members"]),
+                         "X-Keyway-Fusion-Id": fusion_result["fusion_id"]},
             )
 
         # direct mode (default)

@@ -2,16 +2,21 @@
 
 Starts the Keyway server in a daemon thread inside the same Python
 process. No subprocess needed — works when packaged via PyInstaller.
+
+Persists KEYWAY_SECRET / ADMIN_TOKEN / DATA_DIR under the user app-data
+directory and picks a free loopback port when the preferred port is busy.
 """
 
 from __future__ import annotations
 
 import os
-import secrets
 import threading
 import time
 import urllib.request
 from typing import Any
+from urllib.parse import quote
+
+from paths import DEFAULT_PORT, find_free_port, load_or_create_config
 
 READY_TIMEOUT = 30  # seconds
 
@@ -19,10 +24,12 @@ READY_TIMEOUT = 30  # seconds
 class ServerManager:
     """Manages the Keyway server lifecycle in a daemon thread."""
 
-    def __init__(self, host: str = "127.0.0.1", port: int = 9233) -> None:
-        self.host = host
-        self.port = port
-        self.url = f"http://{host}:{port}"
+    def __init__(self, host: str = "127.0.0.1", preferred_port: int | None = None) -> None:
+        self.host = host if host in {"127.0.0.1", "localhost", "::1"} else "127.0.0.1"
+        self.preferred_port = preferred_port
+        self.port = preferred_port or DEFAULT_PORT
+        self.url = f"http://{self.host}:{self.port}"
+        self.config: dict[str, str] = {}
         self._thread: threading.Thread | None = None
         self._server: Any = None
 
@@ -32,31 +39,47 @@ class ServerManager:
 
     @property
     def admin_token(self) -> str:
-        env = self._env()
-        return env.get("KEYWAY_ADMIN_TOKEN", "")
+        return (self.config.get("KEYWAY_ADMIN_TOKEN")
+                or os.environ.get("KEYWAY_ADMIN_TOKEN", ""))
 
-    def _env(self) -> dict[str, str]:
-        env = os.environ.copy()
-        # Desktop always binds loopback — never expose auth-bypass remotely.
-        env["KEYWAY_HOST"] = self.host if self.host in {"127.0.0.1", "localhost", "::1"} else "127.0.0.1"
-        self.host = env["KEYWAY_HOST"]
-        self.url = f"http://{self.host}:{self.port}"
-        env.setdefault("KEYWAY_PORT", str(self.port))
-        if not env.get("KEYWAY_SECRET"):
-            env["KEYWAY_SECRET"] = secrets.token_urlsafe(48)
-        if not env.get("KEYWAY_ADMIN_TOKEN"):
-            env["KEYWAY_ADMIN_TOKEN"] = secrets.token_urlsafe(24)
-        env.setdefault("KEYWAY_DESKTOP_MODE", "1")
-        return env
+    def admin_url(self) -> str:
+        """URL that sets a session cookie then opens the admin panel."""
+        token = self.admin_token
+        if token:
+            return f"{self.url}/admin/desktop-login?token={quote(token, safe='')}"
+        return f"{self.url}/admin.html"
+
+    def prepare_env(self) -> dict[str, str]:
+        """Load persistent config, choose a free port, apply to os.environ."""
+        cfg = load_or_create_config()
+        preferred = self.preferred_port
+        if preferred is None:
+            try:
+                preferred = int(cfg.get("KEYWAY_PORT") or DEFAULT_PORT)
+            except ValueError:
+                preferred = DEFAULT_PORT
+
+        port = find_free_port(self.host, preferred)
+        self.port = port
+        self.url = f"http://{self.host}:{port}"
+
+        cfg = dict(cfg)
+        cfg["KEYWAY_HOST"] = self.host
+        cfg["KEYWAY_PORT"] = str(port)
+        cfg["KEYWAY_DESKTOP_MODE"] = "1"
+        self.config = cfg
+
+        for k, v in cfg.items():
+            os.environ[k] = v
+        # Ensure public base matches the bound port for admin URL display
+        os.environ["KEYWAY_PUBLIC_BASE_URL"] = self.url
+        return cfg
 
     def start(self) -> bool:
         if self.running:
             return True
 
-        env = self._env()
-        for k, v in env.items():
-            if k.startswith("KEYWAY_"):
-                os.environ[k] = v
+        self.prepare_env()
 
         self._thread = threading.Thread(target=self._run_server, daemon=True)
         self._thread.start()

@@ -43,6 +43,17 @@ cp .env.example .env   # 编辑：设置 KEYWAY_SECRET（必填）和 KEYWAY_ADM
 python -m keyway
 ```
 
+### 桌面端（Windows）
+
+```bash
+pip install -e ".[dev]"
+pip install -r keyway-desktop/requirements.txt
+python keyway-desktop/main.py
+# 或：cd keyway-desktop && pyinstaller Keyway.spec  → dist/Keyway.exe
+```
+
+数据与密钥保存在 `%APPDATA%\Keyway`。详见 [keyway-desktop/README.md](keyway-desktop/README.md)。
+
 ## 后续教程
 
 - **首次配置**（添加 Provider、路由、Key）：[入门指南](tutorial/getting-started-zh.md)

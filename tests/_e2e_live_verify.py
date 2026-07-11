@@ -97,11 +97,16 @@ class _MockUpstream(BaseHTTPRequestHandler):
 
         if path.endswith("/messages") or path.endswith("/v1/messages"):
             model = body.get("model", "mock")
+            blob = json.dumps(body.get("messages") or [])
+            if "judge" in model or "Synthesize" in blob or "candidate answers" in blob.lower():
+                text = "anthropic-fused-final"
+            else:
+                text = f"anthropic-ok-{model}"
             self._json(200, {
                 "id": "msg_1",
                 "type": "message",
                 "role": "assistant",
-                "content": [{"type": "text", "text": f"anthropic-ok-{model}"}],
+                "content": [{"type": "text", "text": text}],
                 "model": model,
                 "stop_reason": "end_turn",
                 "usage": {"input_tokens": 4, "output_tokens": 3},
@@ -196,6 +201,12 @@ def main() -> int:
             })
             report.check("create anthropic provider", r.status_code == 200, r.text[:160])
 
+            r = c.post("/admin/llm/groups/default/providers", headers=h, json={
+                "provider_id": "mock-ant-2", "name": "Mock Anthropic 2",
+                "base_url": mock_anth, "api_key": "ant-mock-2", "protocol": "anthropic",
+            })
+            report.check("create anthropic provider 2", r.status_code == 200)
+
             # routes
             r = c.post("/admin/llm/groups/default/routes", headers=h, json={
                 "alias": "chat", "provider_id": "mock-oai", "upstream_model": "mock-model",
@@ -216,6 +227,11 @@ def main() -> int:
                 "alias": "judge", "provider_id": "mock-oai", "upstream_model": "judge-model",
             })
             report.check("create judge route", r.status_code == 200)
+
+            r = c.post("/admin/llm/groups/default/routes", headers=h, json={
+                "alias": "judge-ant", "provider_id": "mock-ant", "upstream_model": "judge-claude",
+            })
+            report.check("create anthropic judge route", r.status_code == 200)
 
             r = c.post("/admin/llm/groups/default/routes", headers=h, json={
                 "alias": "smart", "provider_id": "mock-oai", "upstream_model": "m1",
@@ -255,6 +271,24 @@ def main() -> int:
             })
             c.post(f"/admin/llm/routes/{fuse_id}/providers", headers=h, json={
                 "provider_id": "mock-oai-2", "upstream_model": "m2", "priority": 1,
+            })
+
+            r = c.post("/admin/llm/groups/default/routes", headers=h, json={
+                "alias": "fuse-ant", "provider_id": "mock-ant", "upstream_model": "claude-a",
+                "mode": "fusion",
+                "fusion_config": json.dumps({
+                    "judge_alias": "judge-ant",
+                    "strategy": "compare_and_synthesize",
+                    "min_candidates": 2,
+                }),
+            })
+            report.check("create anthropic fusion route", r.status_code == 200)
+            fuse_ant_id = r.json()["route"]["route_id"]
+            c.post(f"/admin/llm/routes/{fuse_ant_id}/providers", headers=h, json={
+                "provider_id": "mock-ant", "upstream_model": "claude-a", "priority": 0,
+            })
+            c.post(f"/admin/llm/routes/{fuse_ant_id}/providers", headers=h, json={
+                "provider_id": "mock-ant-2", "upstream_model": "claude-b", "priority": 1,
             })
 
             r = c.post("/admin/llm/groups/default/routes", headers=h, json={
@@ -333,10 +367,15 @@ def main() -> int:
             )
 
             r = c.post("/v1/messages", headers=auth, json={
-                "model": "fuse", "max_tokens": 16,
+                "model": "fuse-ant", "max_tokens": 16,
                 "messages": [{"role": "user", "content": "hi"}],
             })
-            report.check("POST /v1/messages fusion rejected", r.status_code == 400, r.text[:160])
+            report.check(
+                "POST /v1/messages fusion",
+                r.status_code == 200 and "X-Keyway-Fusion-Id" in r.headers
+                and "anthropic-fused-final" in r.text,
+                f"status={r.status_code} body={r.text[:200]}",
+            )
 
             r = c.post("/v1/generations", headers=auth, json={
                 "model": "img-gen", "input": {"prompt": "cat"},

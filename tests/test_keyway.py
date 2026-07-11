@@ -296,13 +296,21 @@ def test_get_tool_definitions_respects_enabled_in_group(keyway_env: Path) -> Non
     s = LLMStore(keyway_env / "keyway.db", secret=SECRET)
     s.create_provider_in_group("default", "p1", "P1", "https://x/v1", "k")
     router = LLMRouter(s)
-    assert router.get_tool_definitions("default") == []
+    # Keyless builtins (datetime_now, http_fetch) are always included.
+    keyless = router.get_tool_definitions("default")
+    names = {d["function"]["name"] for d in keyless}
+    assert "datetime_now" in names
+    assert "http_fetch" in names
+    assert "tavily_search" not in names
     s.create_tool_provider_in_group("default", "tavily", "Tavily", "tvly-key")
     defs = router.get_tool_definitions("default")
-    assert len(defs) == 1
-    assert defs[0]["function"]["name"] == "tavily_search"
+    names = {d["function"]["name"] for d in defs}
+    assert "tavily_search" in names
+    assert "datetime_now" in names
     s.update_tool_provider("tavily", enabled=False)
-    assert router.get_tool_definitions("default") == []
+    names = {d["function"]["name"] for d in router.get_tool_definitions("default")}
+    assert "tavily_search" not in names
+    assert "datetime_now" in names
     s.close()
 
 
@@ -906,6 +914,47 @@ def test_complete_auto_select_all_fail(keyway_env: Path, monkeypatch: pytest.Mon
     s.close()
 
 
+def test_stream_auto_select_failover_before_first_byte(
+    keyway_env: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    s = LLMStore(keyway_env / "keyway.db", secret=SECRET)
+    s.create_provider_in_group("default", "p1", "P1", "https://x/v1", "k")
+    s.create_provider_in_group("default", "p2", "P2", "https://y/v1", "k")
+    r = s.create_route_in_group("default", "smart", "p1", "m1", mode="auto-select")
+    s.add_route_provider(r["route_id"], "p1", "m1", priority=0)
+    s.add_route_provider(r["route_id"], "p2", "m2", priority=1)
+    router = LLMRouter(s)
+    candidates = router.resolve_route_auto("smart", group_id="default", required_protocol="openai")
+
+    call_providers: list[str] = []
+
+    async def fake_call_stream(self, provider, model, body):
+        call_providers.append(provider["provider_id"])
+        if provider["provider_id"] == "p1":
+            raise UpstreamError("upstream 503: unavailable", status_code=503)
+        yield b'data: {"choices":[{"delta":{"content":"ok"}}]}\n\n'
+        yield b"data: [DONE]\n\n"
+
+    monkeypatch.setattr(LLMRouter, "_call_upstream_stream", fake_call_stream)
+
+    import asyncio
+
+    async def collect():
+        chunks = []
+        async for c in router.stream_auto_select(
+            {"model": "smart", "messages": [], "stream": True},
+            candidates=candidates, protocol="openai",
+        ):
+            chunks.append(c)
+        return b"".join(chunks)
+
+    out = asyncio.run(collect())
+    assert call_providers == ["p1", "p2"]
+    assert b"ok" in out
+    assert b"[DONE]" in out
+    s.close()
+
+
 # ---------- Multi-mode: auto-select endpoint dispatch ----------
 
 def test_v1_chat_completions_auto_select(keyway_env: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1058,6 +1107,59 @@ def test_modality_detector_with_image_block() -> None:
         {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "abc"}},
     ]}]}
     assert "image" in ModalityDetector.detect(body)
+
+
+def test_modality_detector_tool_result_openai() -> None:
+    body = {"messages": [
+        {"role": "assistant", "content": None, "tool_calls": []},
+        {"role": "tool", "tool_call_id": "c1", "content": '{"ok": true}'},
+    ]}
+    mods = ModalityDetector.detect(body)
+    assert "tool_result" in mods
+    assert ModalityDetector.has_tool_result(body)
+    assert ModalityDetector.needs_adaptation(body)
+
+
+def test_modality_detector_tool_result_anthropic() -> None:
+    body = {"messages": [{"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": "tu_1", "content": "result text"},
+    ]}]}
+    assert "tool_result" in ModalityDetector.detect(body)
+
+
+def test_adapter_pipeline_flattens_openai_tool_result(keyway_env: Path) -> None:
+    s = LLMStore(keyway_env / "keyway.db", secret=SECRET)
+    s.create_provider_in_group("default", "p1", "P1", "https://x/v1", "k")
+    router = LLMRouter(s)
+    pipeline = AdapterPipeline(router, {})
+    import asyncio
+    body = {"messages": [
+        {"role": "user", "content": "search"},
+        {"role": "tool", "tool_call_id": "call_1", "content": "found cats"},
+    ]}
+    out = asyncio.run(pipeline.adapt(body))
+    assert out["messages"][1]["role"] == "user"
+    assert "Tool result" in out["messages"][1]["content"]
+    assert "found cats" in out["messages"][1]["content"]
+    s.close()
+
+
+def test_adapter_pipeline_flattens_anthropic_tool_result(keyway_env: Path) -> None:
+    s = LLMStore(keyway_env / "keyway.db", secret=SECRET)
+    s.create_provider_in_group("default", "p1", "P1", "https://x/v1", "k")
+    router = LLMRouter(s)
+    pipeline = AdapterPipeline(router, {})
+    import asyncio
+    body = {"messages": [{"role": "user", "content": [
+        {"type": "text", "text": "continue"},
+        {"type": "tool_result", "tool_use_id": "tu_9", "content": "42"},
+    ]}]}
+    out = asyncio.run(pipeline.adapt(body))
+    blocks = out["messages"][0]["content"]
+    assert all(b.get("type") != "tool_result" for b in blocks)
+    texts = [b.get("text", "") for b in blocks if b.get("type") == "text"]
+    assert any("Tool result" in t and "42" in t for t in texts)
+    s.close()
 
 
 def test_adapter_pipeline_no_image_passthrough(keyway_env: Path) -> None:
@@ -1575,6 +1677,37 @@ def test_desktop_mode_forces_loopback_host(keyway_env: Path, monkeypatch: pytest
     assert os.environ["KEYWAY_HOST"] == "127.0.0.1"
 
 
+def test_admin_desktop_login_sets_cookie(keyway_env: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("KEYWAY_ADMIN_TOKEN", ADMIN_TOKEN)
+    with TestClient(create_app()) as c:
+        r = c.get(f"/admin/desktop-login?token={ADMIN_TOKEN}", follow_redirects=False)
+        assert r.status_code in (302, 307)
+        assert r.headers.get("location", "").endswith("/admin.html")
+        assert "keyway_admin_session" in r.cookies
+
+        bad = c.get("/admin/desktop-login?token=wrong", follow_redirects=False)
+        assert bad.status_code in (302, 307)
+        assert bad.headers.get("location") in ("/", "/")
+
+
+def test_admin_llm_overview(keyway_env: Path) -> None:
+    s = LLMStore(keyway_env / "keyway.db", secret=SECRET)
+    s.create_provider_in_group("default", "p1", "P1", "https://x/v1", "k")
+    s.log_request(
+        api_key_id=None, route_alias="alias", provider_id="p1",
+        upstream_model="m", status_code=502, request_tokens=0, response_tokens=0,
+        latency_ms=10, error="upstream boom", group_id="default",
+    )
+    s.close()
+    with TestClient(create_app()) as c:
+        r = c.get("/admin/llm/overview", headers={"X-Admin-Token": ADMIN_TOKEN})
+        assert r.status_code == 200, r.text
+        ov = r.json()["overview"]
+        assert "groups" in ov
+        assert "open_circuits" in ov
+        assert any("boom" in (e.get("error") or "") for e in ov.get("recent_errors") or [])
+
+
 # ---------- /v1/generations + count_tokens ----------
 
 def test_v1_count_tokens(keyway_env: Path) -> None:
@@ -1637,25 +1770,43 @@ def test_v1_generations_success(keyway_env: Path, monkeypatch: pytest.MonkeyPatc
         assert r.json()["output"]["task_id"] == "t-99"
 
 
-def test_v1_messages_fusion_rejected(keyway_env: Path) -> None:
+def test_v1_messages_fusion_mode(keyway_env: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     s = LLMStore(keyway_env / "keyway.db", secret=SECRET)
     s.create_provider_in_group("default", "p1", "P1", "https://x", "k", protocol="anthropic")
     s.create_provider_in_group("default", "p2", "P2", "https://y", "k", protocol="anthropic")
+    s.create_provider_in_group("default", "pj", "Judge", "https://z", "k", protocol="anthropic")
     import json as _json
     r = s.create_route_in_group(
         "default", "fuse", "p1", "m1", mode="fusion",
-        fusion_config=_json.dumps({"judge_alias": "judge"}),
+        fusion_config=_json.dumps({"judge_alias": "judge", "strategy": "compare_and_synthesize"}),
     )
     s.add_route_provider(r["route_id"], "p1", "m1", priority=0)
     s.add_route_provider(r["route_id"], "p2", "m2", priority=1)
+    s.create_route_in_group("default", "judge", "pj", "judge-model")
     plaintext = generate_key()
     s.create_key_in_group("default", hash_key(plaintext), key_prefix(plaintext), "test")
     s.close()
+
+    async def fake_anth(self, provider, body):
+        model = body.get("model", "")
+        if "judge" in model or "Synthesize" in json.dumps(body):
+            text = "anthropic-fused"
+        else:
+            text = f"cand-{provider['provider_id']}"
+        return {
+            "id": "msg_1", "type": "message", "role": "assistant",
+            "content": [{"type": "text", "text": text}],
+            "model": model, "stop_reason": "end_turn",
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+        }
+    monkeypatch.setattr(LLMRouter, "_call_upstream_anthropic_non_stream", fake_anth)
+
     with TestClient(create_app()) as c:
         resp = c.post(
             "/v1/messages",
             headers={"Authorization": f"Bearer {plaintext}"},
             json={"model": "fuse", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 16},
         )
-        assert resp.status_code == 400
-        assert "fusion" in resp.text.lower()
+        assert resp.status_code == 200, resp.text
+        assert "anthropic-fused" in resp.text
+        assert "X-Keyway-Fusion-Id" in resp.headers
