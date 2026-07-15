@@ -54,11 +54,18 @@ python keyway-desktop/main.py
 
 Data and secrets persist under `%APPDATA%\Keyway`. See [keyway-desktop/README.md](keyway-desktop/README.md).
 
+Logo / icon assets live in `src/keyway/web/assets/` and `keyway-desktop/keyway.ico`. Regenerate with:
+
+```bash
+python scripts/generate_logo_assets.py
+```
+
 ## Next Steps
 
 - **First-time setup** (add providers, routes, keys): see [Getting Started](tutorial/getting-started.md)
 - **Multi-provider + Claude Code walkthrough**: see [Multi-Provider Setup](tutorial/multi-provider-setup.md)
 - **Auto-select, adapter, fusion modes**: see [Multi-Mode Processing](tutorial/multi-mode-processing.md)
+- **Upstream key pool + user quotas**: see [Key Pool](tutorial/key-pool.md)
 - **Full API reference**: see [API Reference](tutorial/api-reference.md)
 - **Architecture & development**: see [Architecture](tutorial/architecture.md)
 

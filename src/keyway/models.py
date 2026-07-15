@@ -80,12 +80,41 @@ class LLMKeyCreateRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=128)
     expires_at: str | None = Field(default=None, max_length=64)
     owner_user_id: str | None = Field(default=None, max_length=64)
+    max_requests: int | None = Field(default=None, ge=1)
+    max_tokens: int | None = Field(default=None, ge=1)
+    concurrency_limit: int | None = Field(default=None, ge=1)
+    rpm_limit: int | None = Field(default=None, ge=1)
 
 
 class LLMKeyUpdateRequest(BaseModel):
     name: str | None = Field(default=None, max_length=128)
     enabled: bool | None = None
     expires_at: str | None = Field(default=None, max_length=64)
+    max_requests: int | None = Field(default=None, ge=1)
+    max_tokens: int | None = Field(default=None, ge=1)
+    concurrency_limit: int | None = Field(default=None, ge=1)
+    rpm_limit: int | None = Field(default=None, ge=1)
+    clear_max_requests: bool = False
+    clear_max_tokens: bool = False
+    clear_concurrency_limit: bool = False
+    clear_rpm_limit: bool = False
+    reset_usage: bool = False
+
+
+class LLMCredentialCreateRequest(BaseModel):
+    api_key: str = Field(..., min_length=1, max_length=4096)
+    label: str = Field(default="", max_length=128)
+    priority: int = Field(default=0)
+    weight: int = Field(default=1, ge=1)
+    enabled: bool = True
+
+
+class LLMCredentialUpdateRequest(BaseModel):
+    api_key: str | None = Field(default=None, max_length=4096)
+    label: str | None = Field(default=None, max_length=128)
+    priority: int | None = None
+    weight: int | None = Field(default=None, ge=1)
+    enabled: bool | None = None
 
 
 class LLMToolProviderCreateRequest(BaseModel):
@@ -110,3 +139,7 @@ class LLMTestRequest(BaseModel):
 
 class AdminLoginRequest(BaseModel):
     token: str = Field(..., min_length=1, max_length=256)
+
+
+class UISettingsUpdateRequest(BaseModel):
+    language: str | None = Field(default=None, max_length=8)

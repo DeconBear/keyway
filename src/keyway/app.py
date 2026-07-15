@@ -59,6 +59,8 @@ from .modality import ModalityDetector
 from .fusion import FusionOrchestrator
 from .models import (
     AdminLoginRequest,
+    LLMCredentialCreateRequest,
+    LLMCredentialUpdateRequest,
     LLMGroupCopyRequest,
     LLMGroupCreateRequest,
     LLMGroupUpdateRequest,
@@ -73,7 +75,10 @@ from .models import (
     LLMTestRequest,
     LLMToolProviderCreateRequest,
     LLMToolProviderUpdateRequest,
+    UISettingsUpdateRequest,
 )
+from .key_quota import KeyQuotaError, KeyQuotaGate
+from .ui_settings import SUPPORTED_LANGUAGES, load_ui_settings, save_ui_settings
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
 SESSION_TTL_SECONDS = 7 * 24 * 60 * 60  # 7 days
@@ -159,9 +164,10 @@ def create_app() -> FastAPI:
     # ---- stores ----
     llm_store = LLMStore(settings.data_dir / "keyway.db", secret=settings.secret)
     llm_router = LLMRouter(llm_store)
+    key_quota = KeyQuotaGate()
     sessions = _SessionStore()
 
-    app = FastAPI(title="Keyway", version="0.1.3", docs_url=None, redoc_url=None, openapi_url=None)
+    app = FastAPI(title="Keyway", version="0.1.4", docs_url=None, redoc_url=None, openapi_url=None)
 
     app.add_middleware(
         CORSMiddleware,
@@ -174,6 +180,7 @@ def create_app() -> FastAPI:
     app.state.settings = settings
     app.state.llm_store = llm_store
     app.state.llm_router = llm_router
+    app.state.key_quota = key_quota
     app.state.admin_token = admin_token
     app.state.sessions = sessions
     app.state.logger = logger
@@ -218,14 +225,33 @@ def create_app() -> FastAPI:
     def _resolve_llm_api_key(
         request: Request,
         token: str = Depends(_llm_bearer_auth),
-    ) -> dict[str, Any]:
+    ):
         key_row = request.app.state.llm_store.get_key_by_hash(_llm_hash_key(token))
         if not key_row or not key_row.get("enabled"):
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or disabled API key.")
         if key_row.get("expires_at") and key_row["expires_at"] < _utc_now_iso():
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="API key expired.")
+        gate: KeyQuotaGate = request.app.state.key_quota
+        path = request.url.path
+        need_slot = path not in ("/v1/models", "/v1/messages/count_tokens")
+        try:
+            gate.check(key_row)
+            if need_slot:
+                gate.acquire(key_row)
+        except KeyQuotaError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.message)
         request.app.state.llm_store.touch_key_used(key_row["key_id"])
-        return key_row
+        try:
+            yield key_row
+        finally:
+            if need_slot:
+                gate.release(key_row["key_id"])
+
+    def _bump_key_usage(key: dict[str, Any], *, tokens: int = 0) -> None:
+        try:
+            llm_store.bump_key_usage(key["key_id"], requests=1, tokens=max(0, int(tokens)))
+        except Exception:
+            logger.exception("failed to bump key usage for %s", key.get("key_id"))
 
     def _estimate_tokens(req: dict) -> int:
         """Rough char/4 heuristic."""
@@ -293,7 +319,54 @@ def create_app() -> FastAPI:
         base_url = request.app.state.settings.public_base_url
         if not base_url:
             base_url = str(request.base_url).rstrip("/")
-        return {"ok": True, "config": {"app_base_url": base_url, "desktop_mode": request.app.state.desktop_mode}}
+        ui = load_ui_settings(request.app.state.settings.data_dir)
+        return {
+            "ok": True,
+            "config": {
+                "app_base_url": base_url,
+                "desktop_mode": request.app.state.desktop_mode,
+                "language": ui.get("language", "en"),
+                "supported_languages": list(SUPPORTED_LANGUAGES),
+            },
+        }
+
+    @app.get("/admin/ui-locale")
+    def admin_ui_locale(request: Request) -> dict:
+        """Public locale bootstrap for the login page (no auth)."""
+        ui = load_ui_settings(request.app.state.settings.data_dir)
+        return {
+            "ok": True,
+            "language": ui.get("language", "en"),
+            "supported_languages": list(SUPPORTED_LANGUAGES),
+        }
+
+    @app.get("/admin/settings")
+    def admin_get_settings(request: Request, _admin: dict = Depends(_require_admin)) -> dict:
+        ui = load_ui_settings(request.app.state.settings.data_dir)
+        return {
+            "ok": True,
+            "settings": ui,
+            "supported_languages": list(SUPPORTED_LANGUAGES),
+        }
+
+    @app.patch("/admin/settings")
+    def admin_patch_settings(
+        payload: UISettingsUpdateRequest,
+        request: Request,
+        _admin: dict = Depends(_require_admin),
+    ) -> dict:
+        try:
+            ui = save_ui_settings(
+                request.app.state.settings.data_dir,
+                payload.model_dump(exclude_unset=True),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+        return {
+            "ok": True,
+            "settings": ui,
+            "supported_languages": list(SUPPORTED_LANGUAGES),
+        }
 
     # ==================== Admin: groups ====================
 
@@ -425,6 +498,71 @@ def create_app() -> FastAPI:
         if not llm_store.delete_provider_in_group(provider_id):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"provider not found: {provider_id}")
         return {"ok": True, "message": f"provider deleted: {provider_id}"}
+
+    # ==================== Admin: provider credentials (upstream key pool) ====================
+
+    @app.get("/admin/llm/providers/{provider_id}/credentials")
+    def admin_list_credentials(provider_id: str, _admin: dict = Depends(_require_admin)) -> dict:
+        if not llm_store.get_provider(provider_id):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"provider not found: {provider_id}")
+        return {
+            "ok": True,
+            "credentials": llm_store.list_credentials(provider_id),
+            "health": llm_store.list_credential_health(provider_id),
+        }
+
+    @app.post("/admin/llm/providers/{provider_id}/credentials")
+    def admin_create_credential(
+        provider_id: str,
+        payload: LLMCredentialCreateRequest,
+        _admin: dict = Depends(_require_admin),
+    ) -> dict:
+        try:
+            cred = llm_store.create_credential(
+                provider_id,
+                api_key=payload.api_key,
+                label=payload.label,
+                priority=payload.priority,
+                weight=payload.weight,
+                enabled=payload.enabled,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+        return {"ok": True, "credential": cred}
+
+    @app.patch("/admin/llm/credentials/{credential_id}")
+    def admin_update_credential(
+        credential_id: str,
+        payload: LLMCredentialUpdateRequest,
+        _admin: dict = Depends(_require_admin),
+    ) -> dict:
+        cred = llm_store.update_credential(
+            credential_id,
+            api_key=payload.api_key,
+            label=payload.label,
+            enabled=payload.enabled,
+            priority=payload.priority,
+            weight=payload.weight,
+        )
+        if not cred:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"credential not found: {credential_id}")
+        return {"ok": True, "credential": cred}
+
+    @app.delete("/admin/llm/credentials/{credential_id}")
+    def admin_delete_credential(credential_id: str, _admin: dict = Depends(_require_admin)) -> dict:
+        if not llm_store.delete_credential(credential_id):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"credential not found: {credential_id}")
+        return {"ok": True, "message": f"credential deleted: {credential_id}"}
+
+    @app.post("/admin/llm/credentials/{credential_id}/health/reset")
+    def admin_reset_credential_health(credential_id: str, _admin: dict = Depends(_require_admin)) -> dict:
+        result = llm_store.reset_credential_health(credential_id)
+        if not result:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"no health record for credential: {credential_id}",
+            )
+        return {"ok": True, "health": result}
 
     # ==================== Admin: group routes ====================
 
@@ -605,6 +743,10 @@ def create_app() -> FastAPI:
                 key_prefix=_llm_key_prefix(plaintext), name=payload.name,
                 owner_user_id=payload.owner_user_id, expires_at=payload.expires_at,
                 key_encrypted=_llm_encrypt(plaintext),
+                max_requests=payload.max_requests,
+                max_tokens=payload.max_tokens,
+                concurrency_limit=payload.concurrency_limit,
+                rpm_limit=payload.rpm_limit,
             )
         except ValueError as exc:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
@@ -638,8 +780,31 @@ def create_app() -> FastAPI:
         payload: LLMKeyUpdateRequest,
         _admin: dict = Depends(_require_admin),
     ) -> dict:
+        max_requests: Any = "__UNSET__"
+        max_tokens: Any = "__UNSET__"
+        concurrency_limit: Any = "__UNSET__"
+        rpm_limit: Any = "__UNSET__"
+        if payload.clear_max_requests:
+            max_requests = None
+        elif payload.max_requests is not None:
+            max_requests = payload.max_requests
+        if payload.clear_max_tokens:
+            max_tokens = None
+        elif payload.max_tokens is not None:
+            max_tokens = payload.max_tokens
+        if payload.clear_concurrency_limit:
+            concurrency_limit = None
+        elif payload.concurrency_limit is not None:
+            concurrency_limit = payload.concurrency_limit
+        if payload.clear_rpm_limit:
+            rpm_limit = None
+        elif payload.rpm_limit is not None:
+            rpm_limit = payload.rpm_limit
         k = llm_store.update_key_in_group(
             key_id=key_id, name=payload.name, enabled=payload.enabled, expires_at=payload.expires_at,
+            max_requests=max_requests, max_tokens=max_tokens,
+            concurrency_limit=concurrency_limit, rpm_limit=rpm_limit,
+            reset_usage=payload.reset_usage,
         )
         if not k:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"key not found: {key_id}")
@@ -792,6 +957,7 @@ def create_app() -> FastAPI:
             msg = f"model '{alias}' not found in group '{group_id}'"
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=msg)
 
+        _bump_key_usage(key, tokens=_estimate_tokens(body))
         mode = route.get("mode") or "direct"
 
         if mode == "auto-select":
@@ -968,6 +1134,7 @@ def create_app() -> FastAPI:
                 detail={"type": "not_found_error", "message": msg},
             )
 
+        _bump_key_usage(key, tokens=_estimate_tokens(req))
         mode = route.get("mode") or "direct"
 
         if mode == "auto-select":
@@ -1218,7 +1385,7 @@ def create_app() -> FastAPI:
 
     @app.get("/health")
     def health() -> dict:
-        return {"ok": True, "version": "0.1.3"}
+        return {"ok": True, "version": "0.1.4"}
 
     # ==================== Web UI ====================
 

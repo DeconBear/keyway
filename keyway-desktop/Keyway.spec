@@ -18,9 +18,11 @@ for _f in _glob.glob(str(_web_dir / "**" / "*"), recursive=True):
         _dest_dir = "keyway/web" if str(_rel_parent) == "." else str(Path("keyway/web") / _rel_parent)
         _web_files.append((_f, _dest_dir))
 
-# Build the datas list: bundled icon + web assets
+# Build the datas list: bundled icon + logo assets + web assets
 _datas = [
-    (str(Path(SPECPATH) / "keyway.ico"), "."),  # (src, dest) tuple for Analysis
+    (str(Path(SPECPATH) / "keyway.ico"), "."),
+    (str(Path(SPECPATH) / "assets" / "logo.png"), "assets"),
+    (str(Path(SPECPATH) / "assets" / "logo-mark.png"), "assets"),
 ]
 _datas.extend(_web_files)
 
@@ -42,8 +44,11 @@ _a = Analysis(
         "keyway.modality",
         "keyway.adapters",
         "keyway.fusion",
+        "keyway.key_quota",
+        "keyway.ui_settings",
         "paths",
         "server",
+        "win_icon",
         "uvicorn",
         "uvicorn.loops",
         "uvicorn.loops.auto",

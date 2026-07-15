@@ -1708,6 +1708,35 @@ def test_admin_llm_overview(keyway_env: Path) -> None:
         assert any("boom" in (e.get("error") or "") for e in ov.get("recent_errors") or [])
 
 
+def test_ui_settings_language_default_and_patch(keyway_env: Path) -> None:
+    with TestClient(create_app()) as c:
+        pub = c.get("/admin/ui-locale")
+        assert pub.status_code == 200
+        assert pub.json()["language"] == "en"
+
+        got = c.get("/admin/settings", headers={"X-Admin-Token": ADMIN_TOKEN})
+        assert got.status_code == 200
+        assert got.json()["settings"]["language"] == "en"
+
+        bad = c.patch(
+            "/admin/settings",
+            headers={"X-Admin-Token": ADMIN_TOKEN},
+            json={"language": "fr"},
+        )
+        assert bad.status_code == 400
+
+        ok = c.patch(
+            "/admin/settings",
+            headers={"X-Admin-Token": ADMIN_TOKEN},
+            json={"language": "zh"},
+        )
+        assert ok.status_code == 200
+        assert ok.json()["settings"]["language"] == "zh"
+        assert c.get("/admin/ui-locale").json()["language"] == "zh"
+        cfg = c.get("/admin/config", headers={"X-Admin-Token": ADMIN_TOKEN}).json()["config"]
+        assert cfg["language"] == "zh"
+
+
 # ---------- /v1/generations + count_tokens ----------
 
 def test_v1_count_tokens(keyway_env: Path) -> None:
@@ -1810,3 +1839,102 @@ def test_v1_messages_fusion_mode(keyway_env: Path, monkeypatch: pytest.MonkeyPat
         assert resp.status_code == 200, resp.text
         assert "anthropic-fused" in resp.text
         assert "X-Keyway-Fusion-Id" in resp.headers
+
+
+def test_provider_credential_pool_migration_and_rr(keyway_env: Path) -> None:
+    s = LLMStore(keyway_env / "keyway.db", secret=SECRET)
+    s.create_provider_in_group("default", "p1", "P1", "https://x/v1", "sk-one")
+    creds = s.list_credentials("p1")
+    assert len(creds) == 1
+    s.create_credential("p1", "sk-two", label="pool-2", priority=0)
+    healthy = s.list_healthy_credentials("p1")
+    assert len(healthy) == 2
+    keys = {c["api_key"] for c in [s.pick_credential("p1"), s.pick_credential("p1")]}
+    assert keys == {"sk-one", "sk-two"}
+    s.close()
+
+
+def test_credential_failover_on_429(keyway_env: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    s = LLMStore(keyway_env / "keyway.db", secret=SECRET)
+    s.create_provider_in_group("default", "p1", "P1", "https://x/v1", "sk-bad")
+    # Lower priority number = tried first; good key is the failover target.
+    s.create_credential("p1", "sk-good", label="good", priority=1)
+    s.create_route_in_group("default", "m", "p1", "model-a")
+    s.close()
+
+    seen: list[str] = []
+
+    async def fake_call(self, provider, model, body):
+        seen.append(provider["api_key"])
+        if provider["api_key"] == "sk-bad":
+            raise UpstreamError("rate limited", status_code=429)
+        return {
+            "id": "c1",
+            "choices": [{"message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+        }
+
+    monkeypatch.setattr(LLMRouter, "_call_upstream_non_stream", fake_call)
+    s2 = LLMStore(keyway_env / "keyway.db", secret=SECRET)
+    router = LLMRouter(s2)
+    import asyncio
+    result = asyncio.run(
+        router.complete({"model": "m", "messages": [{"role": "user", "content": "hi"}]})
+    )
+    assert result["choices"][0]["message"]["content"] == "ok"
+    assert seen[0] == "sk-bad"
+    assert "sk-good" in seen
+    s2.close()
+
+
+def test_key_quota_blocks_requests(keyway_env: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    s = LLMStore(keyway_env / "keyway.db", secret=SECRET)
+    s.create_provider_in_group("default", "p1", "P1", "https://x/v1", "k")
+    s.create_route_in_group("default", "m", "p1", "model-a")
+    plaintext = generate_key()
+    s.create_key_in_group(
+        "default", hash_key(plaintext), key_prefix(plaintext), "limited",
+        max_requests=1,
+    )
+    s.close()
+
+    async def fake_call(self, provider, model, body):
+        return {
+            "id": "c1",
+            "choices": [{"message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+        }
+    monkeypatch.setattr(LLMRouter, "_call_upstream_non_stream", fake_call)
+
+    with TestClient(create_app()) as c:
+        h = {"Authorization": f"Bearer {plaintext}"}
+        body = {"model": "m", "messages": [{"role": "user", "content": "hi"}]}
+        r1 = c.post("/v1/chat/completions", headers=h, json=body)
+        assert r1.status_code == 200, r1.text
+        r2 = c.post("/v1/chat/completions", headers=h, json=body)
+        assert r2.status_code == 429, r2.text
+
+
+def test_admin_credential_crud(keyway_env: Path) -> None:
+    s = LLMStore(keyway_env / "keyway.db", secret=SECRET)
+    s.create_provider_in_group("default", "p1", "P1", "https://x/v1", "sk-one")
+    s.close()
+    with TestClient(create_app()) as c:
+        headers = {"X-Admin-Token": ADMIN_TOKEN}
+        listed = c.get("/admin/llm/providers/p1/credentials", headers=headers)
+        assert listed.status_code == 200
+        assert listed.json()["credentials"]
+        created = c.post(
+            "/admin/llm/providers/p1/credentials",
+            headers=headers,
+            json={"api_key": "sk-two", "label": "extra", "priority": 1},
+        )
+        assert created.status_code == 200, created.text
+        cid = created.json()["credential"]["credential_id"]
+        patched = c.patch(
+            f"/admin/llm/credentials/{cid}",
+            headers=headers,
+            json={"enabled": False},
+        )
+        assert patched.status_code == 200
+        assert patched.json()["credential"]["enabled"] == 0

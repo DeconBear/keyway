@@ -46,7 +46,9 @@ class UpstreamError(RuntimeError):
     def __init__(self, message: str, status_code: int = 0) -> None:
         super().__init__(message)
         self.status_code = status_code
-        self.retryable = status_code == 0 or status_code >= 500
+        # 429 (rate limit) and 5xx / transport errors are retryable across
+        # credentials and auto-select candidates; other 4xx are not.
+        self.retryable = status_code == 0 or status_code == 429 or status_code >= 500
 
 
 class LLMRouter:
@@ -406,6 +408,55 @@ class LLMRouter:
         result["message"] = f"{models_err}. Add a route under this provider to enable chat fallback."
         return result
 
+    def _provider_credential_variants(
+        self, provider: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        """Expand a provider into one dict per healthy credential (failover order).
+
+        If the pool is empty, returns the provider as-is (legacy single-key).
+        """
+        pid = provider.get("provider_id") or ""
+        creds = self.store.list_healthy_credentials(pid) if pid else []
+        if not creds:
+            if provider.get("api_key"):
+                return [provider]
+            # Try legacy bind once more
+            full = self.store.get_provider_with_key(pid) if pid else None
+            return [full] if full and full.get("api_key") else []
+        # Round-robin start: rotate so pick_credential's cursor still advances
+        picked = self.store.pick_credential(pid)
+        ordered = list(creds)
+        if picked:
+            cid = picked["credential_id"]
+            ordered = [c for c in creds if c["credential_id"] == cid] + [
+                c for c in creds if c["credential_id"] != cid
+            ]
+        out: list[dict[str, Any]] = []
+        for cred in ordered:
+            p = dict(provider)
+            p["api_key"] = cred["api_key"]
+            p["credential_id"] = cred["credential_id"]
+            out.append(p)
+        return out
+
+    def _record_upstream_success(self, provider: dict[str, Any]) -> None:
+        cid = provider.get("credential_id")
+        pid = provider.get("provider_id") or ""
+        gid = provider.get("group_id") or ""
+        if cid:
+            self.store.record_credential_success(cid, pid)
+        elif pid:
+            self.store.record_provider_success(pid, gid)
+
+    def _record_upstream_failure(self, provider: dict[str, Any]) -> None:
+        cid = provider.get("credential_id")
+        pid = provider.get("provider_id") or ""
+        gid = provider.get("group_id") or ""
+        if cid:
+            self.store.record_credential_failure(cid, pid)
+        elif pid:
+            self.store.record_provider_failure(pid, gid)
+
     @staticmethod
     def _resolved_with_model(
         route: dict[str, Any], provider: dict[str, Any], upstream_model: str,
@@ -435,61 +486,98 @@ class LLMRouter:
             yield b"data: [DONE]\n\n"
             return
 
-        route, provider = resolved
+        route, provider_base = resolved
         upstream_model = route["upstream_model"]
-        body = dict(req_body)
-        body["model"] = upstream_model
-        body["stream"] = True
+        variants = self._provider_credential_variants(provider_base)
+        if not variants:
+            err = {
+                "error": {
+                    "message": f"no healthy upstream credentials for provider '{provider_base.get('provider_id','')}'",
+                    "type": "router_error",
+                }
+            }
+            yield f"data: {json.dumps(err)}\n\n".encode("utf-8")
+            yield b"data: [DONE]\n\n"
+            return
 
-        start = time.time()
-        status_code = 0
-        req_tokens = 0
-        resp_tokens = 0
-        error_msg = ""
-        yielded = False
-        try:
-            proto = provider.get("protocol") or "openai"
-            if proto == "anthropic":
-                agen = self._call_upstream_anthropic_stream(provider, body)
-            else:
-                agen = self._call_upstream_stream(provider, upstream_model, body)
-            async for chunk in agen:
-                yielded = True
-                yield chunk
-            status_code = 200
-        except UpstreamError as exc:
-            error_msg = f"{type(exc).__name__}: {exc}"
-            status_code = exc.status_code or 502
-            if exc.retryable:
-                self.store.record_provider_failure(provider.get("provider_id", ""),
-                                                   provider.get("group_id") or "")
-            if raise_connect_errors and not yielded:
-                # Allow auto-select to try the next candidate before any bytes
-                # have been committed to the client.
-                raise
-            err = {"error": {"message": error_msg, "type": "router_error"}}
+        last_exc: Exception | None = None
+        for vi, provider in enumerate(variants):
+            body = dict(req_body)
+            body["model"] = upstream_model
+            body["stream"] = True
+
+            start = time.time()
+            status_code = 0
+            req_tokens = 0
+            resp_tokens = 0
+            error_msg = ""
+            yielded = False
             try:
-                yield f"data: {json.dumps(err)}\n\n".encode("utf-8")
-                yield b"data: [DONE]\n\n"
-            except Exception:
-                pass
-        except Exception as exc:
-            error_msg = f"{type(exc).__name__}: {exc}"
-            if raise_connect_errors and not yielded:
-                raise UpstreamError(error_msg, status_code=502) from exc
-            err = {"error": {"message": error_msg, "type": "router_error"}}
-            try:
-                yield f"data: {json.dumps(err)}\n\n".encode("utf-8")
-                yield b"data: [DONE]\n\n"
-            except Exception:
-                pass
-            status_code = 502
-        finally:
-            latency = int((time.time() - start) * 1000)
-            self._log(route["alias"], provider.get("group_id") or "",
-                      provider.get("provider_id", ""), upstream_model, status_code,
-                      req_tokens, resp_tokens, latency, error_msg, api_key_id,
-                      fusion_id=fusion_id)
+                proto = provider.get("protocol") or "openai"
+                if proto == "anthropic":
+                    agen = self._call_upstream_anthropic_stream(provider, body)
+                else:
+                    agen = self._call_upstream_stream(provider, upstream_model, body)
+                async for chunk in agen:
+                    yielded = True
+                    yield chunk
+                status_code = 200
+                self._record_upstream_success(provider)
+                latency = int((time.time() - start) * 1000)
+                self._log(route["alias"], provider.get("group_id") or "",
+                          provider.get("provider_id", ""), upstream_model, status_code,
+                          req_tokens, resp_tokens, latency, "", api_key_id,
+                          fusion_id=fusion_id)
+                return
+            except UpstreamError as exc:
+                error_msg = f"{type(exc).__name__}: {exc}"
+                status_code = exc.status_code or 502
+                last_exc = exc
+                if exc.retryable:
+                    self._record_upstream_failure(provider)
+                latency = int((time.time() - start) * 1000)
+                self._log(route["alias"], provider.get("group_id") or "",
+                          provider.get("provider_id", ""), upstream_model, status_code,
+                          req_tokens, resp_tokens, latency, error_msg, api_key_id,
+                          fusion_id=fusion_id)
+                if yielded:
+                    err = {"error": {"message": error_msg, "type": "router_error"}}
+                    try:
+                        yield f"data: {json.dumps(err)}\n\n".encode("utf-8")
+                        yield b"data: [DONE]\n\n"
+                    except Exception:
+                        pass
+                    return
+                if raise_connect_errors and (not exc.retryable or vi == len(variants) - 1):
+                    raise
+                if exc.retryable and vi < len(variants) - 1:
+                    continue
+                if raise_connect_errors:
+                    raise
+                err = {"error": {"message": error_msg, "type": "router_error"}}
+                try:
+                    yield f"data: {json.dumps(err)}\n\n".encode("utf-8")
+                    yield b"data: [DONE]\n\n"
+                except Exception:
+                    pass
+                return
+            except Exception as exc:
+                error_msg = f"{type(exc).__name__}: {exc}"
+                latency = int((time.time() - start) * 1000)
+                self._log(route["alias"], provider.get("group_id") or "",
+                          provider.get("provider_id", ""), upstream_model, 502,
+                          0, 0, latency, error_msg, api_key_id, fusion_id=fusion_id)
+                if raise_connect_errors and not yielded:
+                    raise UpstreamError(error_msg, status_code=502) from exc
+                err = {"error": {"message": error_msg, "type": "router_error"}}
+                try:
+                    yield f"data: {json.dumps(err)}\n\n".encode("utf-8")
+                    yield b"data: [DONE]\n\n"
+                except Exception:
+                    pass
+                return
+        if last_exc and raise_connect_errors:
+            raise last_exc
 
     # -------- non-streaming --------
     async def complete(
@@ -504,8 +592,39 @@ class LLMRouter:
         if not resolved:
             raise ValueError(f"unknown or disabled model alias: {req_body.get('model','')}")
 
-        route, provider = resolved
+        route, provider_base = resolved
         upstream_model = route["upstream_model"]
+        variants = self._provider_credential_variants(provider_base)
+        if not variants:
+            raise UpstreamError(
+                f"no healthy upstream credentials for provider '{provider_base.get('provider_id','')}'",
+                status_code=503,
+            )
+
+        last_exc: Exception | None = None
+        for vi, provider in enumerate(variants):
+            try:
+                return await self._complete_with_provider(
+                    req_body, route, provider, upstream_model,
+                    api_key_id=api_key_id, fusion_id=fusion_id,
+                )
+            except UpstreamError as exc:
+                last_exc = exc
+                if not exc.retryable or vi == len(variants) - 1:
+                    raise
+                continue
+        raise last_exc if last_exc else UpstreamError("all credentials failed")
+
+    async def _complete_with_provider(
+        self,
+        req_body: dict[str, Any],
+        route: dict[str, Any],
+        provider: dict[str, Any],
+        upstream_model: str,
+        *,
+        api_key_id: str | None = None,
+        fusion_id: str | None = None,
+    ) -> dict[str, Any]:
         proto = provider.get("protocol") or "openai"
         group_id = provider.get("group_id") or ""
 
@@ -520,10 +639,6 @@ class LLMRouter:
         else:
             body = dict(req_body)
 
-        start = time.time()
-        status_code = 0
-        req_tokens = 0
-        resp_tokens = 0
         error_msg = ""
         try:
             for _ in range(MAX_TOOL_ITERATIONS):
@@ -542,7 +657,7 @@ class LLMRouter:
                             int((time.time() - iter_start) * 1000), "", api_key_id,
                             fusion_id=fusion_id,
                         )
-                        self.store.record_provider_success(provider.get("provider_id", ""), group_id)
+                        self._record_upstream_success(provider)
                         return resp_json
                     resp_json = await self._call_upstream_non_stream(provider, upstream_model, body)
                 except UpstreamError as exc:
@@ -554,7 +669,7 @@ class LLMRouter:
                         fusion_id=fusion_id,
                     )
                     if exc.retryable:
-                        self.store.record_provider_failure(provider.get("provider_id", ""), group_id)
+                        self._record_upstream_failure(provider)
                     raise
                 iter_status = 200
                 usage = resp_json.get("usage") or {}
@@ -566,7 +681,7 @@ class LLMRouter:
                     iter_req, iter_resp, int((time.time() - iter_start) * 1000), "", api_key_id,
                     fusion_id=fusion_id,
                 )
-                self.store.record_provider_success(provider.get("provider_id", ""), group_id)
+                self._record_upstream_success(provider)
 
                 choice = (resp_json.get("choices") or [{}])[0]
                 message = choice.get("message") or {}

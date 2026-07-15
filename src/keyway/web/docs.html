@@ -4,6 +4,9 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Keyway — Integration Docs</title>
+  <link rel="icon" href="/assets/favicon.ico" sizes="any" />
+  <link rel="icon" href="/assets/logo.svg" type="image/svg+xml" />
+  <link rel="apple-touch-icon" href="/assets/logo-192.png" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet" />
@@ -13,6 +16,8 @@
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: 'IBM Plex Sans', sans-serif; background: var(--bg); color: var(--text); font-size: 14px; line-height: 1.6; }
     .topbar { position: sticky; top: 0; z-index: 10; display: flex; align-items: center; justify-content: space-between; padding: 0.7rem 1.5rem; background: var(--card); border-bottom: 1px solid var(--border); }
+    .topbar .brand { display: flex; align-items: center; gap: 0.55rem; }
+    .topbar .brand img.logo { width: 28px; height: 28px; border-radius: 7px; display: block; }
     .topbar .brand .name { font-size: 1.2rem; font-weight: 600; }
     .topbar .brand .sub { font-size: 0.75rem; color: var(--muted); }
     .topbar nav { display: flex; gap: 0.8rem; }
@@ -53,6 +58,7 @@
 <body>
   <header class="topbar">
     <div class="brand">
+      <img class="logo" src="/assets/logo.svg" width="28" height="28" alt="Keyway" />
       <span class="name">Keyway</span>
       <span class="sub">Docs</span>
     </div>

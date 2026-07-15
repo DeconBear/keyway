@@ -59,6 +59,7 @@ python keyway-desktop/main.py
 - **首次配置**（添加 Provider、路由、Key）：[入门指南](tutorial/getting-started-zh.md)
 - **多模型 + Claude Code 实战**：[多 Provider 配置](tutorial/multi-provider-setup-zh.md)
 - **自动选择、适配器、融合模式**：[多模式处理](tutorial/multi-mode-processing-zh.md)
+- **上游 Key 池 + 用户配额**：[Key 池方案](tutorial/key-pool-zh.md)
 - **完整 API 参考**：[API 参考](tutorial/api-reference-zh.md)
 - **架构与开发**：[架构说明](tutorial/architecture-zh.md)
 

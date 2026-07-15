@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="Keyway">
+  <!-- Transparent mark for inline UI (inherits dark/light via currentColor if desired) -->
+  <g fill="none" stroke="currentColor" stroke-width="12" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="64" cy="38" r="18"/>
+    <path d="M64 56 V78"/>
+    <path d="M64 78 L38 104"/>
+    <path d="M64 78 L90 104"/>
+  </g>
+  <path fill="currentColor" d="M38 104 L28 92 L48 94 Z"/>
+  <path fill="currentColor" d="M90 104 L80 94 L100 92 Z"/>
+</svg>

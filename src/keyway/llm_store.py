@@ -1,6 +1,7 @@
-"""LLM Router data layer (grouped): 8 tables
-(llm_groups / llm_providers / model_routes / route_providers /
-llm_api_keys / llm_tool_providers / llm_request_logs / provider_health) + CRUD.
+"""LLM Router data layer (grouped):
+llm_groups / llm_providers / provider_credentials / model_routes /
+route_providers / llm_api_keys / llm_tool_providers / llm_request_logs /
+provider_health / credential_health + CRUD.
 """
 
 from __future__ import annotations
@@ -20,6 +21,14 @@ DEFAULT_GROUP_NAME = "Default Group"
 VALID_MODES = ("direct", "auto-select", "adapter", "fusion")
 CIRCUIT_FAIL_THRESHOLD = 3
 CIRCUIT_OPEN_SECONDS = 60
+_KEY_QUOTA_COLS = (
+    "max_requests",
+    "used_requests",
+    "max_tokens",
+    "used_tokens",
+    "concurrency_limit",
+    "rpm_limit",
+)
 
 
 def _utc_now_iso() -> str:
@@ -31,11 +40,13 @@ class LLMStore:
         self._db_path = db_path
         self._secret = secret
         self._lock = Lock()
+        self._rr_cursors: dict[str, int] = {}
         self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA foreign_keys = ON")
         self._init_schema()
         self._ensure_default_group()
+        self._migrate_provider_credentials()
 
     def close(self) -> None:
         self._conn.close()
@@ -167,6 +178,31 @@ class LLMStore:
                     circuit_open_until TEXT,
                     FOREIGN KEY (provider_id) REFERENCES llm_providers(provider_id) ON DELETE CASCADE
                 );
+
+                CREATE TABLE IF NOT EXISTS provider_credentials (
+                    credential_id TEXT PRIMARY KEY,
+                    provider_id   TEXT NOT NULL,
+                    api_key       TEXT NOT NULL,
+                    label         TEXT NOT NULL DEFAULT '',
+                    enabled       INTEGER NOT NULL DEFAULT 1,
+                    priority      INTEGER NOT NULL DEFAULT 0,
+                    weight        INTEGER NOT NULL DEFAULT 1,
+                    created_at    TEXT NOT NULL,
+                    updated_at    TEXT NOT NULL,
+                    FOREIGN KEY (provider_id) REFERENCES llm_providers(provider_id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS credential_health (
+                    credential_id      TEXT PRIMARY KEY,
+                    provider_id        TEXT NOT NULL,
+                    consecutive_fails  INTEGER NOT NULL DEFAULT 0,
+                    last_fail_at       TEXT,
+                    last_success_at    TEXT,
+                    circuit_open       INTEGER NOT NULL DEFAULT 0,
+                    circuit_open_until TEXT,
+                    FOREIGN KEY (credential_id) REFERENCES provider_credentials(credential_id) ON DELETE CASCADE,
+                    FOREIGN KEY (provider_id) REFERENCES llm_providers(provider_id) ON DELETE CASCADE
+                );
                 """
             )
         self._ensure_column("llm_providers", "group_id", "TEXT NOT NULL DEFAULT 'default'")
@@ -178,6 +214,12 @@ class LLMStore:
         self._ensure_column("model_routes", "fusion_config", "TEXT NOT NULL DEFAULT '{}'")
         self._ensure_column("llm_api_keys", "group_id", "TEXT NOT NULL DEFAULT 'default'")
         self._ensure_column("llm_api_keys", "key_encrypted", "TEXT")
+        self._ensure_column("llm_api_keys", "max_requests", "INTEGER")
+        self._ensure_column("llm_api_keys", "used_requests", "INTEGER NOT NULL DEFAULT 0")
+        self._ensure_column("llm_api_keys", "max_tokens", "INTEGER")
+        self._ensure_column("llm_api_keys", "used_tokens", "INTEGER NOT NULL DEFAULT 0")
+        self._ensure_column("llm_api_keys", "concurrency_limit", "INTEGER")
+        self._ensure_column("llm_api_keys", "rpm_limit", "INTEGER")
         self._ensure_column("llm_tool_providers", "group_id", "TEXT NOT NULL DEFAULT 'default'")
         self._ensure_column("llm_request_logs", "group_id", "TEXT NOT NULL DEFAULT 'default'")
         self._ensure_column("llm_request_logs", "fusion_id", "TEXT")
@@ -191,6 +233,8 @@ class LLMStore:
         self._ensure_index("idx_logs_created", "llm_request_logs(created_at DESC)")
         self._ensure_index("idx_route_providers_route", "route_providers(route_id, priority)")
         self._ensure_index("idx_provider_health_group", "provider_health(group_id)")
+        self._ensure_index("idx_provider_credentials_provider", "provider_credentials(provider_id, priority)")
+        self._ensure_index("idx_credential_health_provider", "credential_health(provider_id)")
 
     def _ensure_column(self, table: str, column: str, decl: str) -> None:
         cols = {row["name"] for row in self._conn.execute(f"PRAGMA table_info({table})").fetchall()}
@@ -215,6 +259,28 @@ class LLMStore:
                 "VALUES (?, ?, 1, '', ?, ?)",
                 (DEFAULT_GROUP_ID, DEFAULT_GROUP_NAME, now, now),
             )
+
+    def _migrate_provider_credentials(self) -> None:
+        """Copy legacy llm_providers.api_key into provider_credentials once."""
+        rows = self._conn.execute(
+            "SELECT provider_id, api_key FROM llm_providers WHERE api_key IS NOT NULL AND api_key != ''"
+        ).fetchall()
+        now = _utc_now_iso()
+        with self._lock, self._conn:
+            for row in rows:
+                pid = row["provider_id"]
+                exists = self._conn.execute(
+                    "SELECT 1 FROM provider_credentials WHERE provider_id = ? LIMIT 1",
+                    (pid,),
+                ).fetchone()
+                if exists:
+                    continue
+                self._conn.execute(
+                    "INSERT INTO provider_credentials "
+                    "(credential_id, provider_id, api_key, label, enabled, priority, weight, created_at, updated_at) "
+                    "VALUES (?, ?, ?, 'primary', 1, 0, 1, ?, ?)",
+                    (uuid.uuid4().hex, pid, row["api_key"], now, now),
+                )
 
     # ---------- groups ----------
     def list_groups(self) -> list[dict[str, Any]]:
@@ -344,6 +410,22 @@ class LLMStore:
                      prov.get("protocol", "openai"),
                      prov["enabled"], prov.get("note", ""), now, now),
                 )
+                for cred_row in self._conn.execute(
+                    "SELECT * FROM provider_credentials WHERE provider_id = ?",
+                    (prov["provider_id"],),
+                ).fetchall():
+                    cred = dict(cred_row)
+                    self._conn.execute(
+                        "INSERT INTO provider_credentials "
+                        "(credential_id, provider_id, api_key, label, enabled, priority, weight, created_at, updated_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            uuid.uuid4().hex, new_pid,
+                            self._enc_api_key(self._dec_api_key(cred["api_key"])),
+                            cred.get("label", ""), cred.get("enabled", 1),
+                            cred.get("priority", 0), cred.get("weight", 1), now, now,
+                        ),
+                    )
 
             route_id_map: dict[str, str] = {}
             for r_row in self._conn.execute(
@@ -430,7 +512,7 @@ class LLMStore:
             "SELECT provider_id, group_id, name, base_url, api_key, protocol, enabled, note, created_at, updated_at "
             "FROM llm_providers ORDER BY created_at ASC"
         ).fetchall()
-        return [self._mask_provider(r) for r in rows]
+        return [self._enrich_provider_public(self._mask_provider(r)) for r in rows]  # type: ignore[arg-type]
 
     def list_providers_in_group(self, group_id: str) -> list[dict[str, Any]]:
         rows = self._conn.execute(
@@ -438,7 +520,7 @@ class LLMStore:
             "FROM llm_providers WHERE group_id = ? ORDER BY created_at ASC",
             (group_id,),
         ).fetchall()
-        return [self._mask_provider(r) for r in rows]
+        return [self._enrich_provider_public(self._mask_provider(r)) for r in rows]  # type: ignore[arg-type]
 
     def get_provider(self, provider_id: str) -> dict[str, Any] | None:
         row = self._conn.execute(
@@ -446,23 +528,23 @@ class LLMStore:
             "FROM llm_providers WHERE provider_id = ?",
             (provider_id,),
         ).fetchone()
-        return self._mask_provider(row) if row else None
+        masked = self._mask_provider(row)
+        return self._enrich_provider_public(masked) if masked else None
 
     def get_provider_with_key(self, provider_id: str) -> dict[str, Any] | None:
-        """Internal use (router/owner-reveal): returns the row INCLUDING the
-        decrypted real api_key."""
+        """Internal use (router/owner-reveal): returns the row INCLUDING a
+        decrypted api_key selected from the credential pool (or legacy column)."""
         row = self._conn.execute(
             "SELECT * FROM llm_providers WHERE provider_id = ?", (provider_id,)
         ).fetchone()
         if not row:
             return None
         d = dict(row)
-        d["api_key"] = self._dec_api_key(d.get("api_key", ""))
-        return d
+        return self._bind_provider_credential(d)
 
     def get_provider_with_key_in_group(self, provider_id: str, group_id: str) -> dict[str, Any] | None:
-        """Internal use (router/owner-reveal): returns the row INCLUDING the
-        decrypted real api_key, constrained to the given group."""
+        """Internal use (router/owner-reveal): returns the row INCLUDING a
+        decrypted api_key, constrained to the given group."""
         row = self._conn.execute(
             "SELECT * FROM llm_providers WHERE provider_id = ? AND group_id = ?",
             (provider_id, group_id),
@@ -470,8 +552,19 @@ class LLMStore:
         if not row:
             return None
         d = dict(row)
-        d["api_key"] = self._dec_api_key(d.get("api_key", ""))
-        return d
+        return self._bind_provider_credential(d)
+
+    def _bind_provider_credential(self, provider: dict[str, Any]) -> dict[str, Any]:
+        """Attach a selected credential's api_key onto the provider dict."""
+        cred = self.pick_credential(provider["provider_id"])
+        if cred:
+            provider["api_key"] = cred["api_key"]
+            provider["credential_id"] = cred["credential_id"]
+            return provider
+        # Legacy fallback: decrypt column on llm_providers
+        provider["api_key"] = self._dec_api_key(provider.get("api_key", ""))
+        provider["credential_id"] = None
+        return provider
 
     def create_provider(self, provider_id: str, name: str, base_url: str, api_key: str, note: str = "") -> dict[str, Any]:
         now = _utc_now_iso()
@@ -481,6 +574,12 @@ class LLMStore:
                 "VALUES (?, 'default', ?, ?, ?, 1, ?, ?, ?)",
                 (provider_id, name, base_url, self._enc_api_key(api_key), note, now, now),
             )
+            self._conn.execute(
+                "INSERT INTO provider_credentials "
+                "(credential_id, provider_id, api_key, label, enabled, priority, weight, created_at, updated_at) "
+                "VALUES (?, ?, ?, 'primary', 1, 0, 1, ?, ?)",
+                (uuid.uuid4().hex, provider_id, self._enc_api_key(api_key), now, now),
+            )
         return self.get_provider(provider_id)  # type: ignore[return-value]
 
     def create_provider_in_group(self, group_id: str, provider_id: str, name: str, base_url: str,
@@ -489,11 +588,18 @@ class LLMStore:
             raise ValueError(f"group not found: {group_id}")
         now = _utc_now_iso()
         proto = protocol if protocol in ("openai", "anthropic") else "openai"
+        enc = self._enc_api_key(api_key)
         with self._lock, self._conn:
             self._conn.execute(
                 "INSERT INTO llm_providers (provider_id, group_id, name, base_url, api_key, protocol, enabled, note, created_at, updated_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?)",
-                (provider_id, group_id, name, base_url, self._enc_api_key(api_key), proto, note, now, now),
+                (provider_id, group_id, name, base_url, enc, proto, note, now, now),
+            )
+            self._conn.execute(
+                "INSERT INTO provider_credentials "
+                "(credential_id, provider_id, api_key, label, enabled, priority, weight, created_at, updated_at) "
+                "VALUES (?, ?, ?, 'primary', 1, 0, 1, ?, ?)",
+                (uuid.uuid4().hex, provider_id, enc, now, now),
             )
         return self.get_provider(provider_id)  # type: ignore[return-value]
 
@@ -519,6 +625,8 @@ class LLMStore:
             self._conn.execute(
                 f"UPDATE llm_providers SET {', '.join(sets)} WHERE provider_id = ?", tuple(vals)
             )
+        if api_key is not None:
+            self._sync_primary_credential(provider_id, api_key)
         return self.get_provider(provider_id)
 
     def update_provider_in_group(self, provider_id: str, group_id_check: str | None = None,
@@ -526,7 +634,7 @@ class LLMStore:
                                  api_key: str | None = None, enabled: bool | None = None,
                                  note: str | None = None, protocol: str | None = None) -> dict[str, Any] | None:
         if group_id_check is not None:
-            existing = self.get_provider_with_key(provider_id)
+            existing = self.get_provider(provider_id)
             if not existing or existing.get("group_id") != group_id_check:
                 return None
         sets: list[str] = []
@@ -551,7 +659,32 @@ class LLMStore:
             self._conn.execute(
                 f"UPDATE llm_providers SET {', '.join(sets)} WHERE provider_id = ?", tuple(vals)
             )
+        if api_key is not None:
+            self._sync_primary_credential(provider_id, api_key)
         return self.get_provider(provider_id)
+
+    def _sync_primary_credential(self, provider_id: str, api_key: str) -> None:
+        """Keep the lowest-priority credential in sync when provider.api_key is patched."""
+        now = _utc_now_iso()
+        enc = self._enc_api_key(api_key)
+        with self._lock, self._conn:
+            row = self._conn.execute(
+                "SELECT credential_id FROM provider_credentials WHERE provider_id = ? "
+                "ORDER BY priority ASC, created_at ASC LIMIT 1",
+                (provider_id,),
+            ).fetchone()
+            if row:
+                self._conn.execute(
+                    "UPDATE provider_credentials SET api_key = ?, updated_at = ? WHERE credential_id = ?",
+                    (enc, now, row["credential_id"]),
+                )
+            else:
+                self._conn.execute(
+                    "INSERT INTO provider_credentials "
+                    "(credential_id, provider_id, api_key, label, enabled, priority, weight, created_at, updated_at) "
+                    "VALUES (?, ?, ?, 'primary', 1, 0, 1, ?, ?)",
+                    (uuid.uuid4().hex, provider_id, enc, now, now),
+                )
 
     def delete_provider(self, provider_id: str) -> bool:
         with self._lock, self._conn:
@@ -578,6 +711,21 @@ class LLMStore:
             d["api_key_set"] = True
         else:
             d["api_key_set"] = False
+        return d
+
+    def _enrich_provider_public(self, d: dict[str, Any]) -> dict[str, Any]:
+        pid = d.get("provider_id", "")
+        total = self._conn.execute(
+            "SELECT COUNT(*) FROM provider_credentials WHERE provider_id = ?", (pid,)
+        ).fetchone()[0]
+        healthy = 0
+        for cred in self.list_credentials(pid, include_disabled=False):
+            if not self.is_credential_circuit_open(cred["credential_id"]):
+                healthy += 1
+        d["credential_count"] = total
+        d["credential_healthy"] = healthy
+        if total > 0:
+            d["api_key_set"] = True
         return d
 
     # ---------- model_routes (flat + grouped) ----------
@@ -737,17 +885,22 @@ class LLMStore:
             return cur.rowcount > 0
 
     # ---------- api_keys (flat + grouped) ----------
+    def _key_select_cols(self) -> str:
+        return (
+            "key_id, group_id, key_prefix, name, owner_user_id, enabled, expires_at, "
+            "last_used_at, created_at, max_requests, used_requests, max_tokens, "
+            "used_tokens, concurrency_limit, rpm_limit"
+        )
+
     def list_keys(self) -> list[dict[str, Any]]:
         rows = self._conn.execute(
-            "SELECT key_id, group_id, key_prefix, name, owner_user_id, enabled, expires_at, last_used_at, created_at "
-            "FROM llm_api_keys ORDER BY created_at DESC"
+            f"SELECT {self._key_select_cols()} FROM llm_api_keys ORDER BY created_at DESC"
         ).fetchall()
         return [dict(r) for r in rows]
 
     def list_keys_in_group(self, group_id: str) -> list[dict[str, Any]]:
         rows = self._conn.execute(
-            "SELECT key_id, group_id, key_prefix, name, owner_user_id, enabled, expires_at, last_used_at, created_at "
-            "FROM llm_api_keys WHERE group_id = ? ORDER BY created_at DESC",
+            f"SELECT {self._key_select_cols()} FROM llm_api_keys WHERE group_id = ? ORDER BY created_at DESC",
             (group_id,),
         ).fetchall()
         return [dict(r) for r in rows]
@@ -760,8 +913,7 @@ class LLMStore:
 
     def get_key(self, key_id: str) -> dict[str, Any] | None:
         row = self._conn.execute(
-            "SELECT key_id, group_id, key_prefix, name, owner_user_id, enabled, expires_at, last_used_at, created_at "
-            "FROM llm_api_keys WHERE key_id = ?", (key_id,),
+            f"SELECT {self._key_select_cols()} FROM llm_api_keys WHERE key_id = ?", (key_id,),
         ).fetchone()
         return dict(row) if row else None
 
@@ -773,34 +925,47 @@ class LLMStore:
         return dict(row) if row else None
 
     def create_key(self, key_hash: str, key_prefix: str, name: str, owner_user_id: str | None = None,
-                   expires_at: str | None = None) -> dict[str, Any]:
+                   expires_at: str | None = None, *,
+                   max_requests: int | None = None, max_tokens: int | None = None,
+                   concurrency_limit: int | None = None, rpm_limit: int | None = None) -> dict[str, Any]:
         now = _utc_now_iso()
         key_id = uuid.uuid4().hex
         with self._lock, self._conn:
             self._conn.execute(
-                "INSERT INTO llm_api_keys (key_id, group_id, key_hash, key_prefix, name, owner_user_id, enabled, expires_at, last_used_at, created_at) "
-                "VALUES (?, 'default', ?, ?, ?, ?, 1, ?, NULL, ?)",
-                (key_id, key_hash, key_prefix, name, owner_user_id, expires_at, now),
+                "INSERT INTO llm_api_keys (key_id, group_id, key_hash, key_prefix, name, owner_user_id, "
+                "enabled, expires_at, last_used_at, created_at, max_requests, used_requests, max_tokens, "
+                "used_tokens, concurrency_limit, rpm_limit) "
+                "VALUES (?, 'default', ?, ?, ?, ?, 1, ?, NULL, ?, ?, 0, ?, 0, ?, ?)",
+                (key_id, key_hash, key_prefix, name, owner_user_id, expires_at, now,
+                 max_requests, max_tokens, concurrency_limit, rpm_limit),
             )
         return self.get_key(key_id)  # type: ignore[return-value]
 
     def create_key_in_group(self, group_id: str, key_hash: str, key_prefix: str, name: str,
                              owner_user_id: str | None = None, expires_at: str | None = None,
-                             key_encrypted: str | None = None) -> dict[str, Any]:
+                             key_encrypted: str | None = None, *,
+                             max_requests: int | None = None, max_tokens: int | None = None,
+                             concurrency_limit: int | None = None, rpm_limit: int | None = None) -> dict[str, Any]:
         if not self.get_group(group_id):
             raise ValueError(f"group not found: {group_id}")
         now = _utc_now_iso()
         key_id = uuid.uuid4().hex
         with self._lock, self._conn:
             self._conn.execute(
-                "INSERT INTO llm_api_keys (key_id, group_id, key_hash, key_prefix, name, owner_user_id, enabled, expires_at, last_used_at, created_at, key_encrypted) "
-                "VALUES (?, ?, ?, ?, ?, ?, 1, ?, NULL, ?, ?)",
-                (key_id, group_id, key_hash, key_prefix, name, owner_user_id, expires_at, now, key_encrypted),
+                "INSERT INTO llm_api_keys (key_id, group_id, key_hash, key_prefix, name, owner_user_id, "
+                "enabled, expires_at, last_used_at, created_at, key_encrypted, max_requests, used_requests, "
+                "max_tokens, used_tokens, concurrency_limit, rpm_limit) "
+                "VALUES (?, ?, ?, ?, ?, ?, 1, ?, NULL, ?, ?, ?, 0, ?, 0, ?, ?)",
+                (key_id, group_id, key_hash, key_prefix, name, owner_user_id, expires_at, now, key_encrypted,
+                 max_requests, max_tokens, concurrency_limit, rpm_limit),
             )
         return self.get_key(key_id)  # type: ignore[return-value]
 
     def update_key(self, key_id: str, name: str | None = None, enabled: bool | None = None,
-                   expires_at: str | None = "__UNSET__") -> dict[str, Any] | None:
+                   expires_at: str | None = "__UNSET__", *,
+                   max_requests: Any = "__UNSET__", max_tokens: Any = "__UNSET__",
+                   concurrency_limit: Any = "__UNSET__", rpm_limit: Any = "__UNSET__",
+                   reset_usage: bool = False) -> dict[str, Any] | None:
         sets: list[str] = []
         vals: list[Any] = []
         if name is not None:
@@ -809,6 +974,17 @@ class LLMStore:
             sets.append("enabled = ?"); vals.append(1 if enabled else 0)
         if expires_at != "__UNSET__":
             sets.append("expires_at = ?"); vals.append(expires_at)
+        if max_requests != "__UNSET__":
+            sets.append("max_requests = ?"); vals.append(max_requests)
+        if max_tokens != "__UNSET__":
+            sets.append("max_tokens = ?"); vals.append(max_tokens)
+        if concurrency_limit != "__UNSET__":
+            sets.append("concurrency_limit = ?"); vals.append(concurrency_limit)
+        if rpm_limit != "__UNSET__":
+            sets.append("rpm_limit = ?"); vals.append(rpm_limit)
+        if reset_usage:
+            sets.append("used_requests = 0")
+            sets.append("used_tokens = 0")
         if not sets:
             return self.get_key(key_id)
         vals.append(key_id)
@@ -820,12 +996,28 @@ class LLMStore:
 
     def update_key_in_group(self, key_id: str, group_id_check: str | None = None,
                              name: str | None = None, enabled: bool | None = None,
-                             expires_at: str | None = "__UNSET__") -> dict[str, Any] | None:
+                             expires_at: str | None = "__UNSET__", *,
+                             max_requests: Any = "__UNSET__", max_tokens: Any = "__UNSET__",
+                             concurrency_limit: Any = "__UNSET__", rpm_limit: Any = "__UNSET__",
+                             reset_usage: bool = False) -> dict[str, Any] | None:
         if group_id_check is not None:
             existing = self.get_key(key_id)
             if not existing or existing.get("group_id") != group_id_check:
                 return None
-        return self.update_key(key_id, name=name, enabled=enabled, expires_at=expires_at)
+        return self.update_key(
+            key_id, name=name, enabled=enabled, expires_at=expires_at,
+            max_requests=max_requests, max_tokens=max_tokens,
+            concurrency_limit=concurrency_limit, rpm_limit=rpm_limit,
+            reset_usage=reset_usage,
+        )
+
+    def bump_key_usage(self, key_id: str, *, requests: int = 1, tokens: int = 0) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                "UPDATE llm_api_keys SET used_requests = COALESCE(used_requests, 0) + ?, "
+                "used_tokens = COALESCE(used_tokens, 0) + ? WHERE key_id = ?",
+                (max(0, int(requests)), max(0, int(tokens)), key_id),
+            )
 
     def delete_key(self, key_id: str) -> bool:
         with self._lock, self._conn:
@@ -1078,6 +1270,242 @@ class LLMStore:
             cur = self._conn.execute("DELETE FROM route_providers WHERE rp_id = ?", (rp_id,))
             return cur.rowcount > 0
 
+    # ---------- provider_credentials (upstream key pool) ----------
+    def list_credentials(self, provider_id: str, *, include_disabled: bool = True) -> list[dict[str, Any]]:
+        rows = self._conn.execute(
+            "SELECT credential_id, provider_id, api_key, label, enabled, priority, weight, created_at, updated_at "
+            "FROM provider_credentials WHERE provider_id = ? ORDER BY priority ASC, created_at ASC",
+            (provider_id,),
+        ).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            if not include_disabled and not int(d.get("enabled") or 0):
+                continue
+            k = d.pop("api_key", "") or ""
+            d["api_key"] = (k[:4] + "..." + k[-2:]) if len(k) > 8 else ("***" if k else "")
+            d["api_key_set"] = bool(k)
+            d["circuit_open"] = self.is_credential_circuit_open(d["credential_id"])
+            out.append(d)
+        return out
+
+    def get_credential(self, credential_id: str) -> dict[str, Any] | None:
+        row = self._conn.execute(
+            "SELECT * FROM provider_credentials WHERE credential_id = ?", (credential_id,)
+        ).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        k = d.get("api_key", "") or ""
+        d["api_key"] = (k[:4] + "..." + k[-2:]) if len(k) > 8 else ("***" if k else "")
+        d["api_key_set"] = bool(k)
+        d["circuit_open"] = self.is_credential_circuit_open(credential_id)
+        return d
+
+    def get_credential_with_key(self, credential_id: str) -> dict[str, Any] | None:
+        row = self._conn.execute(
+            "SELECT * FROM provider_credentials WHERE credential_id = ?", (credential_id,)
+        ).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        d["api_key"] = self._dec_api_key(d.get("api_key", ""))
+        return d
+
+    def create_credential(
+        self,
+        provider_id: str,
+        api_key: str,
+        label: str = "",
+        priority: int = 0,
+        weight: int = 1,
+        enabled: bool = True,
+    ) -> dict[str, Any]:
+        if not self.get_provider(provider_id):
+            raise ValueError(f"provider not found: {provider_id}")
+        now = _utc_now_iso()
+        cid = uuid.uuid4().hex
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT INTO provider_credentials "
+                "(credential_id, provider_id, api_key, label, enabled, priority, weight, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    cid, provider_id, self._enc_api_key(api_key), label or "",
+                    1 if enabled else 0, int(priority), max(1, int(weight)), now, now,
+                ),
+            )
+            # Keep legacy column populated for older readers / e2e helpers
+            if not self._conn.execute(
+                "SELECT 1 FROM llm_providers WHERE provider_id = ? AND api_key != ''", (provider_id,)
+            ).fetchone():
+                self._conn.execute(
+                    "UPDATE llm_providers SET api_key = ?, updated_at = ? WHERE provider_id = ?",
+                    (self._enc_api_key(api_key), now, provider_id),
+                )
+        return self.get_credential(cid)  # type: ignore[return-value]
+
+    def update_credential(
+        self,
+        credential_id: str,
+        *,
+        api_key: str | None = None,
+        label: str | None = None,
+        enabled: bool | None = None,
+        priority: int | None = None,
+        weight: int | None = None,
+    ) -> dict[str, Any] | None:
+        sets: list[str] = []
+        vals: list[Any] = []
+        if api_key is not None:
+            sets.append("api_key = ?"); vals.append(self._enc_api_key(api_key))
+        if label is not None:
+            sets.append("label = ?"); vals.append(label)
+        if enabled is not None:
+            sets.append("enabled = ?"); vals.append(1 if enabled else 0)
+        if priority is not None:
+            sets.append("priority = ?"); vals.append(int(priority))
+        if weight is not None:
+            sets.append("weight = ?"); vals.append(max(1, int(weight)))
+        if not sets:
+            return self.get_credential(credential_id)
+        sets.append("updated_at = ?"); vals.append(_utc_now_iso())
+        vals.append(credential_id)
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                f"UPDATE provider_credentials SET {', '.join(sets)} WHERE credential_id = ?",
+                tuple(vals),
+            )
+            if cur.rowcount == 0:
+                return None
+        return self.get_credential(credential_id)
+
+    def delete_credential(self, credential_id: str) -> bool:
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                "DELETE FROM provider_credentials WHERE credential_id = ?", (credential_id,)
+            )
+            return cur.rowcount > 0
+
+    def list_healthy_credentials(self, provider_id: str) -> list[dict[str, Any]]:
+        """Decrypted credentials ordered by priority, skipping disabled / open circuits."""
+        rows = self._conn.execute(
+            "SELECT * FROM provider_credentials WHERE provider_id = ? AND enabled = 1 "
+            "ORDER BY priority ASC, created_at ASC",
+            (provider_id,),
+        ).fetchall()
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            d = dict(r)
+            if self.is_credential_circuit_open(d["credential_id"]):
+                continue
+            d["api_key"] = self._dec_api_key(d.get("api_key", ""))
+            out.append(d)
+        return out
+
+    def pick_credential(self, provider_id: str) -> dict[str, Any] | None:
+        """Round-robin within the lowest healthy priority band."""
+        healthy = self.list_healthy_credentials(provider_id)
+        if not healthy:
+            return None
+        min_pri = min(int(c.get("priority") or 0) for c in healthy)
+        band = [c for c in healthy if int(c.get("priority") or 0) == min_pri]
+        idx = self._rr_cursors.get(provider_id, 0) % len(band)
+        self._rr_cursors[provider_id] = idx + 1
+        return band[idx]
+
+    # ---------- credential_health ----------
+    def _get_credential_health(self, credential_id: str) -> dict[str, Any] | None:
+        row = self._conn.execute(
+            "SELECT * FROM credential_health WHERE credential_id = ?", (credential_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def is_credential_circuit_open(self, credential_id: str) -> bool:
+        row = self._get_credential_health(credential_id)
+        if not row:
+            return False
+        if not int(row.get("circuit_open", 0)):
+            return False
+        until = row.get("circuit_open_until")
+        if not until:
+            return True
+        try:
+            return datetime.now(timezone.utc) < datetime.fromisoformat(until)
+        except Exception:
+            return True
+
+    def record_credential_success(self, credential_id: str, provider_id: str = "") -> None:
+        now = _utc_now_iso()
+        with self._lock, self._conn:
+            existing = self._get_credential_health(credential_id)
+            if existing:
+                self._conn.execute(
+                    "UPDATE credential_health SET consecutive_fails = 0, last_success_at = ?, "
+                    "circuit_open = 0, circuit_open_until = NULL WHERE credential_id = ?",
+                    (now, credential_id),
+                )
+            else:
+                self._conn.execute(
+                    "INSERT INTO credential_health (credential_id, provider_id, consecutive_fails, "
+                    "last_success_at, circuit_open, circuit_open_until) VALUES (?, ?, 0, ?, 0, NULL)",
+                    (credential_id, provider_id, now),
+                )
+
+    def record_credential_failure(self, credential_id: str, provider_id: str = "") -> None:
+        now_iso = _utc_now_iso()
+        now_dt = datetime.now(timezone.utc)
+        with self._lock, self._conn:
+            existing = self._get_credential_health(credential_id)
+            if existing:
+                fails = int(existing.get("consecutive_fails", 0)) + 1
+                if fails >= CIRCUIT_FAIL_THRESHOLD:
+                    open_until = (now_dt + timedelta(seconds=CIRCUIT_OPEN_SECONDS)).isoformat()
+                    self._conn.execute(
+                        "UPDATE credential_health SET consecutive_fails = ?, last_fail_at = ?, "
+                        "circuit_open = 1, circuit_open_until = ? WHERE credential_id = ?",
+                        (fails, now_iso, open_until, credential_id),
+                    )
+                else:
+                    self._conn.execute(
+                        "UPDATE credential_health SET consecutive_fails = ?, last_fail_at = ? "
+                        "WHERE credential_id = ?",
+                        (fails, now_iso, credential_id),
+                    )
+            else:
+                opens = 1 if 1 >= CIRCUIT_FAIL_THRESHOLD else 0
+                open_until = (now_dt + timedelta(seconds=CIRCUIT_OPEN_SECONDS)).isoformat() if opens else None
+                self._conn.execute(
+                    "INSERT INTO credential_health (credential_id, provider_id, consecutive_fails, "
+                    "last_fail_at, circuit_open, circuit_open_until) VALUES (?, ?, ?, ?, ?, ?)",
+                    (credential_id, provider_id, 1, now_iso, opens, open_until),
+                )
+
+    def reset_credential_health(self, credential_id: str) -> dict[str, Any] | None:
+        with self._lock, self._conn:
+            existing = self._get_credential_health(credential_id)
+            if not existing:
+                return None
+            self._conn.execute(
+                "UPDATE credential_health SET consecutive_fails = 0, circuit_open = 0, "
+                "circuit_open_until = NULL WHERE credential_id = ?",
+                (credential_id,),
+            )
+        return self._get_credential_health(credential_id)
+
+    def list_credential_health(self, provider_id: str | None = None) -> list[dict[str, Any]]:
+        if provider_id:
+            rows = self._conn.execute(
+                "SELECT * FROM credential_health WHERE provider_id = ? "
+                "ORDER BY last_fail_at DESC NULLS LAST",
+                (provider_id,),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM credential_health ORDER BY last_fail_at DESC NULLS LAST"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
     # ---------- provider_health (circuit breaker) ----------
     def _get_provider_health(self, provider_id: str) -> dict[str, Any] | None:
         row = self._conn.execute(
@@ -1133,6 +1561,20 @@ class LLMStore:
                 )
 
     def is_circuit_open(self, provider_id: str) -> bool:
+        """Provider unavailable when provider-level circuit is open, or when
+        every enabled credential is circuit-open.
+        """
+        if self._provider_circuit_open(provider_id):
+            return True
+        creds = self._conn.execute(
+            "SELECT credential_id FROM provider_credentials WHERE provider_id = ? AND enabled = 1",
+            (provider_id,),
+        ).fetchall()
+        if not creds:
+            return False
+        return all(self.is_credential_circuit_open(r["credential_id"]) for r in creds)
+
+    def _provider_circuit_open(self, provider_id: str) -> bool:
         row = self._get_provider_health(provider_id)
         if not row:
             return False

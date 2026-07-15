@@ -2,9 +2,11 @@
 // Layout: single HTML page + hash-based view switching.
 //   #                       → list of groups (default view)
 //   #view=group&group_id=X → group detail (providers/routes/keys/tools)
+//   #view=settings         → settings (language, …)
 
 const $ = (sel) => document.querySelector(sel);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const t = (key, vars) => (window.KeywayI18n ? KeywayI18n.t(key, vars) : key);
 
 async function api(path, opts = {}) {
   const resp = await fetch(path, { credentials: "include", ...opts });
@@ -27,10 +29,10 @@ function setStatus(el, text, ok) {
 async function copyText(text, statusEl) {
   try {
     await navigator.clipboard.writeText(text);
-    if (statusEl) setStatus(statusEl, "Copied", true);
+    if (statusEl) setStatus(statusEl, t("common.copied"), true);
     return true;
   } catch {
-    if (statusEl) setStatus(statusEl, "Copy failed", false);
+    if (statusEl) setStatus(statusEl, t("common.copyFailed"), false);
     return false;
   }
 }
@@ -82,14 +84,73 @@ let cachedGroups = [];
 
 async function render() {
   const { view, group_id } = parseHash();
-  if (view === "group" && group_id) {
+  if (view === "settings") {
+    await renderSettings();
+  } else if (view === "group" && group_id) {
     await renderGroupDetail(group_id);
   } else {
     await renderGroupList();
   }
+  if (window.KeywayI18n) KeywayI18n.applyI18n(document);
 }
 
 window.addEventListener("hashchange", render);
+
+async function syncLanguageFromServer() {
+  try {
+    const data = await api("/admin/settings");
+    const lang = (data.settings && data.settings.language) || "en";
+    if (window.KeywayI18n) KeywayI18n.setLanguage(lang);
+  } catch (_) {
+    if (window.KeywayI18n) KeywayI18n.setLanguage(KeywayI18n.loadStoredLanguage());
+  }
+}
+
+async function renderSettings() {
+  currentGroupId = null;
+  const list = $("#list-view");
+  const detail = $("#detail-view");
+  const settings = $("#settings-view");
+  const logs = $("#logs");
+  if (list) list.style.display = "none";
+  if (detail) detail.style.display = "none";
+  if (logs) logs.style.display = "none";
+  if (!settings) return;
+  settings.style.display = "";
+  try {
+    const data = await api("/admin/settings");
+    const lang = (data.settings && data.settings.language) || "en";
+    const sel = $("#settings-language");
+    if (sel) sel.value = lang;
+    if (window.KeywayI18n) KeywayI18n.setLanguage(lang);
+  } catch (e) {
+    setStatus($("#settings-status"), e.message, false);
+  }
+}
+
+function bindSettings() {
+  $("#settings-back")?.addEventListener("click", () => navigate("list"));
+  $("#nav-home")?.addEventListener("click", (e) => {
+    e.preventDefault();
+    navigate("list");
+  });
+  $("#settings-form")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const lang = $("#settings-language")?.value || "en";
+    try {
+      const data = await api("/admin/settings", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ language: lang }),
+      });
+      const saved = (data.settings && data.settings.language) || lang;
+      if (window.KeywayI18n) KeywayI18n.setLanguage(saved);
+      setStatus($("#settings-status"), t("settings.saved"), true);
+    } catch (err) {
+      setStatus($("#settings-status"), err.message, false);
+    }
+  });
+}
 
 // ---------- gateway overview (home) ----------
 async function loadOverview() {
@@ -102,18 +163,18 @@ async function loadOverview() {
     const { overview } = await api("/admin/llm/overview");
     const circuits = overview.open_circuits || 0;
     const circuitLabel = circuits
-      ? `<span class="pill disabled">${circuits} circuit open</span> ${esc((overview.circuit_providers || []).join(", "))}`
-      : `<span class="pill enabled">circuits ok</span>`;
+      ? `<span class="pill disabled">${esc(t("overview.circuitsOpen", { n: circuits }))}</span> ${esc((overview.circuit_providers || []).join(", "))}`
+      : `<span class="pill enabled">${esc(t("overview.circuitsOk"))}</span>`;
     summary.innerHTML = `
-      <div>${healthOk ? '<span class="pill enabled">server ok</span>' : '<span class="pill disabled">server down</span>'}</div>
-      <div>${overview.desktop_mode ? '<span class="pill mode">desktop</span>' : '<span class="pill mode">server</span>'}</div>
-      <div><span class="pill default">${esc(overview.groups || 0)} groups</span></div>
+      <div>${healthOk ? `<span class="pill enabled">${esc(t("overview.serverOk"))}</span>` : `<span class="pill disabled">${esc(t("overview.serverDown"))}</span>`}</div>
+      <div>${overview.desktop_mode ? `<span class="pill mode">${esc(t("overview.desktop"))}</span>` : `<span class="pill mode">${esc(t("overview.server"))}</span>`}</div>
+      <div><span class="pill default">${esc(t("overview.groups", { n: overview.groups || 0 }))}</span></div>
       <div>${circuitLabel}</div>
       <div style="color:var(--muted);font-size:0.78rem;font-family:'IBM Plex Mono',monospace;">${esc(overview.data_dir || "")}</div>
     `;
     const errs = overview.recent_errors || [];
     if (!errs.length) {
-      errors.innerHTML = `<div class="item" style="color:var(--muted);">No recent upstream errors</div>`;
+      errors.innerHTML = `<div class="item" style="color:var(--muted);">${esc(t("overview.noErrors"))}</div>`;
     } else {
       errors.innerHTML = errs.map(e => `
         <div class="item">
@@ -131,7 +192,7 @@ async function loadOverview() {
 function bindOverview() {
   $("#overview-refresh")?.addEventListener("click", async () => {
     await loadOverview();
-    setStatus($("#overview-status"), "Refreshed", true);
+    setStatus($("#overview-status"), t("common.refreshed"), true);
   });
 }
 
@@ -140,8 +201,12 @@ async function renderGroupList() {
   currentGroupId = null;
   const main = $("#list-view");
   const detail = $("#detail-view");
+  const settings = $("#settings-view");
+  const logs = $("#logs");
   if (!main) return;
   if (detail) detail.style.display = "none";
+  if (settings) settings.style.display = "none";
+  if (logs) logs.style.display = "";
   main.style.display = "";
   await loadOverview();
 
@@ -158,26 +223,26 @@ async function renderGroupList() {
 
   const html = groups.map(g => {
     const enabledChip = g.enabled
-      ? `<span class="pill enabled">enabled</span>`
-      : `<span class="pill disabled">disabled</span>`;
+      ? `<span class="pill enabled">${esc(t("group.enabled"))}</span>`
+      : `<span class="pill disabled">${esc(t("group.disabled"))}</span>`;
     const isDefault = g.group_id === "default";
     return `
       <div class="item" style="flex-direction:column;align-items:stretch;gap:0.4rem;">
         <div style="display:flex;gap:0.5rem;align-items:center;">
           <span class="id">${esc(g.group_id)}</span>
           ${enabledChip}
-          ${isDefault ? '<span class="pill default">default</span>' : ""}
+          ${isDefault ? `<span class="pill default">${esc(t("group.default"))}</span>` : ""}
           <strong style="flex:1;min-width:0;">${esc(g.name)}</strong>
-          <button data-action="open" data-gid="${esc(g.group_id)}">Edit</button>
-          <button data-action="copy" data-gid="${esc(g.group_id)}" data-name="${esc(g.name)}">Copy</button>
-          <button class="danger" data-action="delete" data-gid="${esc(g.group_id)}" data-default="${isDefault}" ${isDefault ? "disabled" : ""}>Delete</button>
+          <button data-action="open" data-gid="${esc(g.group_id)}">${esc(t("group.edit"))}</button>
+          <button data-action="copy" data-gid="${esc(g.group_id)}" data-name="${esc(g.name)}">${esc(t("group.copy"))}</button>
+          <button class="danger" data-action="delete" data-gid="${esc(g.group_id)}" data-default="${isDefault}" ${isDefault ? "disabled" : ""}>${esc(t("group.delete"))}</button>
         </div>
         <div style="color:var(--muted);font-size:0.78rem;padding-left:0.3rem;">
-          ${g.provider_count} providers · ${g.route_count} routes · ${g.key_count} keys · ${g.tool_count} tools
+          ${esc(t("group.stats", { p: g.provider_count, r: g.route_count, k: g.key_count, t: g.tool_count }))}
         </div>
       </div>
     `;
-  }).join("") || '<div style="color:var(--muted);font-size:0.85rem;">(no groups yet)</div>';
+  }).join("") || `<div style="color:var(--muted);font-size:0.85rem;">${esc(t("common.empty"))}</div>`;
   $("#group-list").innerHTML = html;
 }
 
@@ -210,8 +275,12 @@ async function renderGroupDetail(group_id) {
   currentGroupId = group_id;
   const main = $("#list-view");
   const detail = $("#detail-view");
+  const settings = $("#settings-view");
+  const logs = $("#logs");
   if (!detail) return;
   if (main) main.style.display = "none";
+  if (settings) settings.style.display = "none";
+  if (logs) logs.style.display = "";
   detail.style.display = "";
 
   try {
@@ -224,22 +293,22 @@ async function renderGroupDetail(group_id) {
   }
 
   const enabledChip = currentGroupMeta.enabled
-    ? `<span class="pill enabled">enabled</span>`
-    : `<span class="pill disabled">disabled</span>`;
+    ? `<span class="pill enabled">${esc(t("group.enabled"))}</span>`
+    : `<span class="pill disabled">${esc(t("group.disabled"))}</span>`;
   const isDefault = group_id === "default";
   $("#detail-head-info").innerHTML = `
     <div style="display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap;">
-      <button data-action="back" style="background:transparent;border:1px solid var(--border);padding:0.3rem 0.7rem;border-radius:5px;cursor:pointer;color:var(--text);">← Back</button>
+      <button data-action="back" style="background:transparent;border:1px solid var(--border);padding:0.3rem 0.7rem;border-radius:5px;cursor:pointer;color:var(--text);">${esc(t("settings.back"))}</button>
       <h1 style="margin:0;font-size:1.5rem;font-weight:500;">${esc(currentGroupMeta.name)}</h1>
       <span class="id">${esc(group_id)}</span>
       ${enabledChip}
-      ${isDefault ? '<span class="pill default">default</span>' : ""}
-      <span style="color:var(--muted);font-size:0.82rem;">${currentGroupMeta.provider_count} providers · ${currentGroupMeta.route_count} routes · ${currentGroupMeta.key_count} keys · ${currentGroupMeta.tool_count} tools</span>
+      ${isDefault ? `<span class="pill default">${esc(t("group.default"))}</span>` : ""}
+      <span style="color:var(--muted);font-size:0.82rem;">${esc(t("group.stats", { p: currentGroupMeta.provider_count, r: currentGroupMeta.route_count, k: currentGroupMeta.key_count, t: currentGroupMeta.tool_count }))}</span>
       <span style="flex:1;"></span>
       <button data-action="rename" style="background:transparent;border:1px solid var(--border);padding:0.3rem 0.7rem;border-radius:5px;cursor:pointer;color:var(--text);">Rename</button>
       <button data-action="toggle-enabled" style="background:transparent;border:1px solid var(--border);padding:0.3rem 0.7rem;border-radius:5px;cursor:pointer;color:var(--text);">${currentGroupMeta.enabled ? "Disable" : "Enable"}</button>
-      <button data-action="copy-detail" style="background:transparent;border:1px solid var(--border);padding:0.3rem 0.7rem;border-radius:5px;cursor:pointer;color:var(--text);">Copy</button>
-      <button data-action="delete-detail" style="background:transparent;border:1px solid #b00;color:#b00;padding:0.3rem 0.7rem;border-radius:5px;cursor:pointer;" ${isDefault ? "disabled" : ""}>Delete</button>
+      <button data-action="copy-detail" style="background:transparent;border:1px solid var(--border);padding:0.3rem 0.7rem;border-radius:5px;cursor:pointer;color:var(--text);">${esc(t("group.copy"))}</button>
+      <button data-action="delete-detail" style="background:transparent;border:1px solid #b00;color:#b00;padding:0.3rem 0.7rem;border-radius:5px;cursor:pointer;" ${isDefault ? "disabled" : ""}>${esc(t("group.delete"))}</button>
     </div>
   `;
 
@@ -261,12 +330,14 @@ async function loadGroupProviders() {
     $("#provider-list").innerHTML = providers.map(p => {
       const proto = p.protocol || "openai";
       const protoBadge = `<span class="pill ${proto}">${proto}</span>`;
+      const pool = `${p.credential_healthy ?? 0}/${p.credential_count ?? 0} keys`;
       return `
       <div class="item">
         <span class="id">${esc(p.provider_id)}</span>
         <div class="grow"><div class="ellipsis"><strong>${esc(p.name)}</strong> — ${esc(p.base_url)} ${p.enabled ? "" : "(disabled)"}</div></div>
         ${protoBadge}
-        <span style="color:var(--muted);font-size:0.78rem;">key: ${p.api_key_set ? "set" : "no"}</span>
+        <span style="color:var(--muted);font-size:0.78rem;">pool: ${esc(pool)}</span>
+        <button data-action="manage-credentials" data-id="${esc(p.provider_id)}">Keys</button>
         <button data-action="edit-provider" data-id="${esc(p.provider_id)}">Edit</button>
         <button data-action="test-provider" data-id="${esc(p.provider_id)}">Test</button>
         <button data-action="toggle-provider" data-id="${esc(p.provider_id)}" data-enabled="${p.enabled ? "1" : "0"}">${p.enabled ? "Disable" : "Enable"}</button>
@@ -274,6 +345,63 @@ async function loadGroupProviders() {
       </div>`;
     }).join("") || "";
   } catch (e) { showOutput("load providers: " + e.message); }
+}
+
+async function showCredentialPanel(providerId) {
+  const panel = $("#credential-panel");
+  if (!panel) return;
+  $("#credential-provider-id").value = providerId;
+  panel.style.display = "";
+  $("#credential-panel-meta").textContent = `Provider: ${providerId}`;
+  await loadCredentials(providerId);
+}
+
+function hideCredentialPanel() {
+  const panel = $("#credential-panel");
+  if (panel) panel.style.display = "none";
+  const form = $("#credential-form");
+  if (form) form.reset();
+}
+
+async function loadCredentials(providerId) {
+  try {
+    const { credentials } = await api(`/admin/llm/providers/${encodeURIComponent(providerId)}/credentials`);
+    $("#credential-list").innerHTML = credentials.map(c => `
+      <div class="item">
+        <span class="id">${esc(c.label || c.credential_id.slice(0, 8))}</span>
+        <div class="grow"><div class="ellipsis">priority ${esc(c.priority)} · ${c.api_key_set ? esc(c.api_key) : "no key"} ${c.enabled ? "" : "(disabled)"} ${c.circuit_open ? "(circuit open)" : ""}</div></div>
+        <button data-action="toggle-credential" data-id="${esc(c.credential_id)}" data-enabled="${c.enabled ? "1" : "0"}">${c.enabled ? "Disable" : "Enable"}</button>
+        <button data-action="reset-credential-health" data-id="${esc(c.credential_id)}">Reset</button>
+        <button class="danger" data-action="delete-credential" data-id="${esc(c.credential_id)}">Delete</button>
+      </div>`).join("") || `<div class="meta">No credentials yet</div>`;
+  } catch (e) { showOutput("load credentials: " + e.message); }
+}
+
+function bindCredentialForm() {
+  $("#credential-close")?.addEventListener("click", hideCredentialPanel);
+  const form = $("#credential-form");
+  if (!form) return;
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const providerId = $("#credential-provider-id").value;
+    if (!providerId) return;
+    const fd = new FormData(e.target);
+    const body = {
+      api_key: fd.get("api_key"),
+      label: fd.get("label") || "",
+      priority: Number(fd.get("priority") || 0),
+    };
+    try {
+      await api(`/admin/llm/providers/${encodeURIComponent(providerId)}/credentials`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+      });
+      setStatus($("#credential-status"), "Added", true);
+      e.target.reset();
+      $("#credential-provider-id").value = providerId;
+      await loadCredentials(providerId);
+      await loadGroupProviders();
+    } catch (err) { setStatus($("#credential-status"), err.message, false); }
+  });
 }
 
 function resetProviderForm() {
@@ -629,16 +757,26 @@ function bindHealth() {
 async function loadGroupKeys() {
   try {
     const { keys } = await api(`/admin/llm/groups/${encodeURIComponent(currentGroupId)}/keys`);
-    $("#key-list").innerHTML = keys.map(k => `
+    $("#key-list").innerHTML = keys.map(k => {
+      const req = k.max_requests != null ? `${k.used_requests || 0}/${k.max_requests}` : `${k.used_requests || 0}/∞`;
+      const tok = k.max_tokens != null ? `${k.used_tokens || 0}/${k.max_tokens}` : `${k.used_tokens || 0}/∞`;
+      const lim = [
+        k.concurrency_limit != null ? `conc ${k.concurrency_limit}` : null,
+        k.rpm_limit != null ? `rpm ${k.rpm_limit}` : null,
+      ].filter(Boolean).join(" · ");
+      return `
       <div class="item">
         <span class="id">${esc(k.key_prefix)}...</span>
-        <div class="grow"><div class="ellipsis">${esc(k.name)} ${k.expires_at ? `(expires ${esc(k.expires_at)})` : "(no expiry)"} ${k.enabled ? "" : "(disabled)"}</div></div>
+        <div class="grow"><div class="ellipsis">${esc(k.name)} ${k.expires_at ? `(expires ${esc(k.expires_at)})` : "(no expiry)"} ${k.enabled ? "" : "(disabled)"}</div>
+          <div style="color:var(--muted);font-size:0.75rem;">req ${esc(req)} · tok ${esc(tok)}${lim ? " · " + esc(lim) : ""}</div>
+        </div>
         <span style="color:var(--muted);font-size:0.78rem;">last used: ${k.last_used_at ? esc(k.last_used_at) : "—"}</span>
         <button data-action="copy-plaintext" data-id="${esc(k.key_id)}">Copy Key</button>
         <button data-action="copy-baseurl" data-id="${esc(k.key_id)}" data-format="openai">OpenAI URL</button>
         <button data-action="copy-baseurl" data-id="${esc(k.key_id)}" data-format="anthropic">Anthropic URL</button>
         <button class="danger" data-action="delete-key" data-id="${esc(k.key_id)}">Delete</button>
-      </div>`).join("") || "";
+      </div>`;
+    }).join("") || "";
   } catch (e) { showOutput("load keys: " + e.message); }
 }
 
@@ -651,6 +789,10 @@ function bindKeyForm() {
     const body = { name: fd.get("name") };
     const exp = fd.get("expires_at");
     if (exp) body.expires_at = exp;
+    for (const field of ["max_requests", "max_tokens", "concurrency_limit", "rpm_limit"]) {
+      const v = fd.get(field);
+      if (v) body[field] = Number(v);
+    }
     try {
       const data = await api(`/admin/llm/groups/${encodeURIComponent(currentGroupId)}/keys`, {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
@@ -874,6 +1016,28 @@ async function runE2e() {
         navigate("list");
       } else if (action === "edit-provider" && id) {
         await editProvider(id);
+      } else if (action === "manage-credentials" && id) {
+        await showCredentialPanel(id);
+      } else if (action === "toggle-credential" && id) {
+        const enabled = btn.dataset.enabled !== "1";
+        await api(`/admin/llm/credentials/${encodeURIComponent(id)}`, {
+          method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled }),
+        });
+        const pid = $("#credential-provider-id")?.value;
+        if (pid) await loadCredentials(pid);
+        await loadGroupProviders();
+      } else if (action === "reset-credential-health" && id) {
+        try {
+          await api(`/admin/llm/credentials/${encodeURIComponent(id)}/health/reset`, { method: "POST" });
+        } catch (_) { /* no health row yet is fine */ }
+        const pid = $("#credential-provider-id")?.value;
+        if (pid) await loadCredentials(pid);
+      } else if (action === "delete-credential" && id) {
+        if (!confirm("Delete this upstream key from the pool?")) return;
+        await api(`/admin/llm/credentials/${encodeURIComponent(id)}`, { method: "DELETE" });
+        const pid = $("#credential-provider-id")?.value;
+        if (pid) await loadCredentials(pid);
+        await loadGroupProviders();
       } else if (action === "test-provider" && id) {
         const { test } = await api("/admin/llm/test", {
           method: "POST", headers: { "Content-Type": "application/json" },
@@ -959,12 +1123,14 @@ async function runE2e() {
   });
 
   bindProviderForm();
+  bindCredentialForm();
   bindRouteForm();
   bindKeyForm();
   bindToolForm();
   bindHealth();
   bindLogs();
   bindOverview();
+  bindSettings();
   syncRouteModeFields();
   $("#e2e-run")?.addEventListener("click", runE2e);
   $("#logout-link")?.addEventListener("click", async (e) => {
@@ -972,6 +1138,7 @@ async function runE2e() {
     try { await api("/admin/logout", { method: "POST" }); } catch {}
     window.location.href = "/";
   });
+  await syncLanguageFromServer();
   await render();
   await populateLogKeySelect();
 })();

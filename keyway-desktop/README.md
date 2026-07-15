@@ -43,3 +43,5 @@ Double-click `Keyway.exe`. First launch creates `%APPDATA%\Keyway\config.env` an
 
 - Desktop mode always binds `127.0.0.1` (auth bypass never exposed on LAN).
 - Admin opens via `/admin/desktop-login` so a session cookie is set even when desktop auth bypass is active.
+- Upstream key pools and user-key quotas are served by the same in-process Keyway server; manage them in Admin → Providers → Keys / Self-issued API Keys. See [../tutorial/key-pool.md](../tutorial/key-pool.md).
+- PyInstaller `Keyway.spec` includes `keyway.key_quota` and `keyway.ui_settings` in `hiddenimports` for packaged builds.

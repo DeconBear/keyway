@@ -13,7 +13,6 @@ Usage:
 
 from __future__ import annotations
 
-import ctypes
 import os
 import sys
 import threading
@@ -24,9 +23,9 @@ import webview
 
 from paths import is_autostart_enabled, set_autostart
 from server import ServerManager
+from win_icon import APP_ID, apply_icons_with_retry, set_app_id
 
 HOST = "127.0.0.1"
-APP_ID = "keyway.desktop.v1"
 
 
 def _get_base_dir() -> str:
@@ -36,40 +35,9 @@ def _get_base_dir() -> str:
 
 
 _ICON_PATH = os.path.join(_get_base_dir(), "keyway.ico")
-
-
-def _set_window_icon() -> None:
-    if sys.platform != "win32" or not os.path.exists(_ICON_PATH):
-        return
-    try:
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_ID)
-        pid = os.getpid()
-        found = None
-
-        def _enum_cb(h: int, _: int) -> bool:
-            nonlocal found
-            import ctypes.wintypes
-            proc_id = ctypes.wintypes.DWORD()
-            ctypes.windll.user32.GetWindowThreadProcessId(h, ctypes.byref(proc_id))
-            if proc_id.value == pid and ctypes.windll.user32.IsWindowVisible(h):
-                buf = ctypes.create_unicode_buffer(256)
-                ctypes.windll.user32.GetWindowTextW(h, buf, 255)
-                if "Keyway" in buf.value and not found:
-                    found = h
-                    return False
-            return True
-
-        WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_int, ctypes.c_int)
-        ctypes.windll.user32.EnumWindows(WNDENUMPROC(_enum_cb), 0)
-        hwnd = found
-        if hwnd:
-            hicon = ctypes.windll.user32.LoadImageW(0, _ICON_PATH, 1, 0, 0, 0x0010)
-            if hicon:
-                WM_SETICON = 0x0080
-                ctypes.windll.user32.PostMessageW(hwnd, WM_SETICON, 1, hicon)
-                ctypes.windll.user32.PostMessageW(hwnd, WM_SETICON, 0, hicon)
-    except Exception:
-        pass
+_LOGO_PNG = os.path.join(_get_base_dir(), "assets", "logo.png")
+if not os.path.exists(_LOGO_PNG):
+    _LOGO_PNG = os.path.join(_get_base_dir(), "logo.png")
 
 
 class KeywayDesktop:
@@ -116,7 +84,6 @@ class KeywayDesktop:
     def _toggle_autostart(self) -> None:
         self._autostart = not self._autostart
         set_autostart(self._autostart)
-        # Rebuild tray menu so checkmark updates
         self._restart_tray()
 
     def _quit(self) -> None:
@@ -146,6 +113,16 @@ class KeywayDesktop:
         self._hide_window()
         return False
 
+    def _on_shown(self) -> None:
+        threading.Thread(
+            target=apply_icons_with_retry,
+            kwargs={
+                "icon_path": _ICON_PATH,
+                "png_path": _LOGO_PNG if os.path.exists(_LOGO_PNG) else None,
+            },
+            daemon=True,
+        ).start()
+
     def _build_tray_menu(self):
         import pystray
         from pystray import MenuItem as Item
@@ -171,7 +148,9 @@ class KeywayDesktop:
             print("[desktop] pystray/Pillow not installed — tray disabled", flush=True)
             return
 
-        if os.path.exists(_ICON_PATH):
+        if os.path.exists(_LOGO_PNG):
+            image = Image.open(_LOGO_PNG)
+        elif os.path.exists(_ICON_PATH):
             image = Image.open(_ICON_PATH)
         else:
             image = Image.new("RGB", (64, 64), color=(17, 17, 17))
@@ -194,7 +173,9 @@ class KeywayDesktop:
             pass
 
     def run(self) -> None:
-        _set_window_icon()
+        # Must run before any HWND is created so the taskbar uses our AppID.
+        set_app_id(APP_ID)
+
         print("[desktop] starting Keyway server...", flush=True)
         ok = self.server.start()
         if not ok:
@@ -216,14 +197,25 @@ class KeywayDesktop:
             confirm_close=False,
         )
         self._window.events.closing += self._on_closing
+        try:
+            self._window.events.shown += self._on_shown
+        except Exception:
+            self._on_shown()
 
         threading.Thread(target=self._poll_status, daemon=True).start()
-        threading.Thread(target=lambda: (time.sleep(1.5), _set_window_icon()), daemon=True).start()
         self._start_tray()
+        # Fallback if shown event never fires
+        threading.Thread(
+            target=apply_icons_with_retry,
+            kwargs={
+                "icon_path": _ICON_PATH,
+                "png_path": _LOGO_PNG if os.path.exists(_LOGO_PNG) else None,
+            },
+            daemon=True,
+        ).start()
 
         webview.start()
 
-        # Event loop ended (destroy / quit)
         self._quitting = True
         self._polling = False
         try:
@@ -236,7 +228,7 @@ class KeywayDesktop:
 
 
 def main() -> None:
-    # Ensure src/ is importable when running from a source checkout
+    set_app_id(APP_ID)
     root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src"))
     if root not in sys.path and os.path.isdir(root):
         sys.path.insert(0, root)

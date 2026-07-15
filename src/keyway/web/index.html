@@ -1,12 +1,16 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Login — Keyway</title>
+  <link rel="icon" href="/assets/favicon.ico" sizes="any" />
+  <link rel="icon" href="/assets/logo.svg" type="image/svg+xml" />
+  <link rel="apple-touch-icon" href="/assets/logo-192.png" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet" />
+  <script src="/assets/i18n.js"></script>
   <style>
     :root { --bg: #fafafa; --card: #fff; --border: #e0e0e0; --text: #111; --muted: #6b6b6b; --accent: #111; --err: #b00; --ok: #0a6; }
     @media (prefers-color-scheme: dark) { :root { --bg: #0d0d0d; --card: #161616; --border: #2a2a2a; --text: #f0f0f0; --muted: #8a8a8a; --accent: #f0f0f0; } }
@@ -22,32 +26,60 @@
     .login-card .status { font-size: 0.82rem; color: var(--err); margin-top: 0.8rem; text-align: center; }
     .login-card .hint { font-size: 0.78rem; color: var(--muted); margin-top: 1rem; line-height: 1.5; }
     .brand { text-align: center; margin-bottom: 1.5rem; }
+    .brand img.logo { width: 56px; height: 56px; border-radius: 14px; display: block; margin: 0 auto 0.75rem; }
     .brand .name { font-size: 1.75rem; font-weight: 600; letter-spacing: -0.02em; }
     .brand .tagline { font-size: 0.78rem; color: var(--muted); }
+    .lang-row { display:flex; justify-content:flex-end; margin-bottom: 0.75rem; }
+    .lang-row select { font-size: 0.8rem; padding: 0.25rem 0.4rem; border: 1px solid var(--border); border-radius: 5px; background: var(--bg); color: var(--text); }
   </style>
 </head>
 <body>
   <div class="login-card">
-    <div class="brand">
-      <div class="name">Keyway</div>
-      <div class="tagline">LLM Routing Gateway</div>
+    <div class="lang-row">
+      <select id="login-lang" aria-label="Language">
+        <option value="en">English</option>
+        <option value="zh">中文</option>
+      </select>
     </div>
-    <h1>Admin Login</h1>
-    <p class="subtitle">Enter your admin token to access the management UI.</p>
+    <div class="brand">
+      <img class="logo" src="/assets/logo.svg" width="56" height="56" alt="Keyway" />
+      <div class="name">Keyway</div>
+      <div class="tagline" data-i18n="login.tagline">LLM Routing Gateway</div>
+    </div>
+    <h1 data-i18n="login.title">Admin Login</h1>
+    <p class="subtitle" data-i18n="login.subtitle">Enter your admin token to access the management UI.</p>
     <form id="login-form">
-      <label for="token">Admin Token</label>
-      <input type="password" id="token" name="token" placeholder="Paste your KEYWAY_ADMIN_TOKEN here" required autocomplete="off" />
-      <button type="submit">Login</button>
+      <label for="token" data-i18n="login.token">Admin Token</label>
+      <input type="password" id="token" name="token" data-i18n-placeholder="login.placeholder" placeholder="Paste your KEYWAY_ADMIN_TOKEN here" required autocomplete="off" />
+      <button type="submit" data-i18n="login.submit">Login</button>
       <div class="status" id="status"></div>
     </form>
-    <p class="hint">
-      The admin token is set via <code>KEYWAY_ADMIN_TOKEN</code> in your <code>.env</code>.
-      If not set, a random token is generated and printed to the console on startup.
+    <p class="hint" data-i18n="login.hint">
+      The admin token is set via KEYWAY_ADMIN_TOKEN in your .env. If not set, a random token is generated and printed to the console on startup. Desktop mode skips this screen on loopback.
     </p>
   </div>
   <script type="module">
     const form = document.getElementById("login-form");
     const status = document.getElementById("status");
+    const langSel = document.getElementById("login-lang");
+
+    async function bootstrapLang() {
+      let lang = window.KeywayI18n ? KeywayI18n.loadStoredLanguage() : "en";
+      try {
+        const resp = await fetch("/admin/ui-locale");
+        if (resp.ok) {
+          const data = await resp.json();
+          if (data.language) lang = data.language;
+        }
+      } catch (_) {}
+      if (window.KeywayI18n) KeywayI18n.setLanguage(lang);
+      if (langSel) langSel.value = window.KeywayI18n ? KeywayI18n.getLanguage() : lang;
+    }
+
+    langSel?.addEventListener("change", () => {
+      if (window.KeywayI18n) KeywayI18n.setLanguage(langSel.value);
+    });
+
     form.addEventListener("submit", async (e) => {
       e.preventDefault();
       const token = document.getElementById("token").value;
@@ -68,6 +100,8 @@
         status.textContent = "Network error: " + err.message;
       }
     });
+
+    bootstrapLang();
   </script>
 </body>
 </html>
