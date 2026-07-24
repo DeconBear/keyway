@@ -1,11 +1,11 @@
 name: Publish to PyPI
 
+# Tag push only. Do not also trigger on `release` — creating a GitHub Release
+# after tagging would re-upload the same files and fail with "File already exists".
 on:
   push:
     tags:
       - "v*"
-  release:
-    types: [published]
 
 jobs:
   build:
