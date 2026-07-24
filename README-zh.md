@@ -56,6 +56,8 @@ python keyway-desktop/main.py
 
 ## 后续教程
 
+文档站：https://deconbear.github.io/keyway/
+
 - **首次配置**（添加 Provider、路由、Key）：[入门指南](tutorial/getting-started-zh.md)
 - **多模型 + Claude Code 实战**：[多 Provider 配置](tutorial/multi-provider-setup-zh.md)
 - **自动选择、适配器、融合模式**：[多模式处理](tutorial/multi-mode-processing-zh.md)

@@ -62,6 +62,8 @@ python scripts/generate_logo_assets.py
 
 ## Next Steps
 
+Docs site: https://deconbear.github.io/keyway/
+
 - **First-time setup** (add providers, routes, keys): see [Getting Started](tutorial/getting-started.md)
 - **Multi-provider + Claude Code walkthrough**: see [Multi-Provider Setup](tutorial/multi-provider-setup.md)
 - **Auto-select, adapter, fusion modes**: see [Multi-Mode Processing](tutorial/multi-mode-processing.md)
