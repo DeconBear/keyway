@@ -7,61 +7,52 @@
   <link rel="icon" href="/assets/favicon.ico" sizes="any" />
   <link rel="icon" href="/assets/logo.svg" type="image/svg+xml" />
   <link rel="apple-touch-icon" href="/assets/logo-192.png" />
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet" />
+  <script>
+    (function () {
+      try {
+        var t = localStorage.getItem("keyway_theme");
+        if (t === "dark" || t === "light") document.documentElement.setAttribute("data-theme", t);
+      } catch (e) {}
+    })();
+  </script>
+  <link rel="stylesheet" href="/assets/app.css" />
   <script src="/assets/i18n.js"></script>
-  <style>
-    :root { --bg: #fafafa; --card: #fff; --border: #e0e0e0; --text: #111; --muted: #6b6b6b; --accent: #111; --err: #b00; --ok: #0a6; }
-    @media (prefers-color-scheme: dark) { :root { --bg: #0d0d0d; --card: #161616; --border: #2a2a2a; --text: #f0f0f0; --muted: #8a8a8a; --accent: #f0f0f0; } }
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { font-family: 'IBM Plex Sans', sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; display: flex; align-items: center; justify-content: center; }
-    .login-card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 2rem 2.5rem; width: 100%; max-width: 400px; }
-    .login-card h1 { font-size: 1.4rem; font-weight: 500; margin-bottom: 0.3rem; }
-    .login-card .subtitle { font-size: 0.85rem; color: var(--muted); margin-bottom: 1.5rem; }
-    .login-card label { display: block; font-size: 0.78rem; color: var(--muted); margin-bottom: 0.3rem; }
-    .login-card input { width: 100%; padding: 0.6rem 0.8rem; font-size: 0.9rem; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); font-family: 'IBM Plex Mono', monospace; }
-    .login-card button { width: 100%; margin-top: 1rem; padding: 0.65rem; font-size: 0.9rem; border: 1px solid var(--accent); border-radius: 6px; background: var(--accent); color: var(--bg); cursor: pointer; font-family: inherit; }
-    .login-card button:hover { opacity: 0.85; }
-    .login-card .status { font-size: 0.82rem; color: var(--err); margin-top: 0.8rem; text-align: center; }
-    .login-card .hint { font-size: 0.78rem; color: var(--muted); margin-top: 1rem; line-height: 1.5; }
-    .brand { text-align: center; margin-bottom: 1.5rem; }
-    .brand img.logo { width: 56px; height: 56px; border-radius: 14px; display: block; margin: 0 auto 0.75rem; }
-    .brand .name { font-size: 1.75rem; font-weight: 600; letter-spacing: -0.02em; }
-    .brand .tagline { font-size: 0.78rem; color: var(--muted); }
-    .lang-row { display:flex; justify-content:flex-end; margin-bottom: 0.75rem; }
-    .lang-row select { font-size: 0.8rem; padding: 0.25rem 0.4rem; border: 1px solid var(--border); border-radius: 5px; background: var(--bg); color: var(--text); }
-  </style>
 </head>
 <body>
-  <div class="login-card">
-    <div class="lang-row">
-      <select id="login-lang" aria-label="Language">
-        <option value="en">English</option>
-        <option value="zh">中文</option>
-      </select>
+  <div class="center-page">
+    <div class="card login-card">
+      <div style="display:flex;justify-content:flex-end;margin-bottom:0.75rem;">
+        <select id="login-lang" class="select" style="width:auto;padding:0.3rem 0.5rem;font-size:0.8rem;" aria-label="Language">
+          <option value="en">English</option>
+          <option value="zh">中文</option>
+        </select>
+      </div>
+      <div class="brand">
+        <img src="/assets/logo.svg" width="56" height="56" alt="Keyway" />
+        <div class="name">Keyway</div>
+        <div class="tagline" data-i18n="login.tagline">LLM Routing Gateway</div>
+      </div>
+      <h1 data-i18n="login.title">Admin Login</h1>
+      <p class="subtitle" data-i18n="login.subtitle">Enter your admin token to access the management UI.</p>
+      <form id="login-form">
+        <div class="field">
+          <label for="token" data-i18n="login.token">Admin Token</label>
+          <input class="input mono" type="password" id="token" name="token" data-i18n-placeholder="login.placeholder" placeholder="Paste your KEYWAY_ADMIN_TOKEN here" required autocomplete="off" />
+        </div>
+        <button type="submit" class="btn btn-primary" id="login-submit" style="width:100%;" data-i18n="login.submit">Login</button>
+        <div class="form-error" id="status"></div>
+      </form>
+      <p class="hint" data-i18n="login.hint">
+        The admin token is set via KEYWAY_ADMIN_TOKEN in your .env. If not set, a random token is printed to the console on startup. Desktop mode skips this screen on loopback.
+      </p>
     </div>
-    <div class="brand">
-      <img class="logo" src="/assets/logo.svg" width="56" height="56" alt="Keyway" />
-      <div class="name">Keyway</div>
-      <div class="tagline" data-i18n="login.tagline">LLM Routing Gateway</div>
-    </div>
-    <h1 data-i18n="login.title">Admin Login</h1>
-    <p class="subtitle" data-i18n="login.subtitle">Enter your admin token to access the management UI.</p>
-    <form id="login-form">
-      <label for="token" data-i18n="login.token">Admin Token</label>
-      <input type="password" id="token" name="token" data-i18n-placeholder="login.placeholder" placeholder="Paste your KEYWAY_ADMIN_TOKEN here" required autocomplete="off" />
-      <button type="submit" data-i18n="login.submit">Login</button>
-      <div class="status" id="status"></div>
-    </form>
-    <p class="hint" data-i18n="login.hint">
-      The admin token is set via KEYWAY_ADMIN_TOKEN in your .env. If not set, a random token is generated and printed to the console on startup. Desktop mode skips this screen on loopback.
-    </p>
   </div>
   <script type="module">
     const form = document.getElementById("login-form");
     const status = document.getElementById("status");
+    const submitBtn = document.getElementById("login-submit");
     const langSel = document.getElementById("login-lang");
+    const t = (k) => (window.KeywayI18n ? KeywayI18n.t(k) : k);
 
     async function bootstrapLang() {
       let lang = window.KeywayI18n ? KeywayI18n.loadStoredLanguage() : "en";
@@ -84,6 +75,7 @@
       e.preventDefault();
       const token = document.getElementById("token").value;
       status.textContent = "";
+      submitBtn.disabled = true;
       try {
         const resp = await fetch("/admin/login", {
           method: "POST",
@@ -94,10 +86,12 @@
           window.location.href = "/admin.html";
         } else {
           const data = await resp.json().catch(() => ({}));
-          status.textContent = data.detail || "Login failed";
+          status.textContent = data.detail || t("login.failed");
         }
       } catch (err) {
-        status.textContent = "Network error: " + err.message;
+        status.textContent = t("login.networkError") + ": " + err.message;
+      } finally {
+        submitBtn.disabled = false;
       }
     });
 

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "keyway-router"
-version = "0.1.4"
+version = "0.2.0"
 description = "A lightweight self-hosted LLM routing gateway with OpenAI & Anthropic dual-protocol support"
 readme = "README.md"
 license = { text = "MIT" }
@@ -37,6 +37,7 @@ dev = ["pytest>=7.0.0", "httpx>=0.27.0"]
 
 [project.urls]
 Homepage = "https://github.com/DeconBear/keyway"
+Documentation = "https://deconbear.github.io/keyway/"
 Issues = "https://github.com/DeconBear/keyway/issues"
 
 [project.scripts]

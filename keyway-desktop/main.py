@@ -48,6 +48,7 @@ class KeywayDesktop:
         self._tray = None
         self._quitting = False
         self._autostart = is_autostart_enabled()
+        self._icons_started = threading.Event()
 
     def _status_text(self) -> str:
         if self.server.running:
@@ -114,6 +115,14 @@ class KeywayDesktop:
         return False
 
     def _on_shown(self) -> None:
+        self._start_icon_thread()
+
+    def _start_icon_thread(self) -> None:
+        """Kick off the icon-apply worker exactly once (shown event and the
+        unconditional fallback both call this)."""
+        if self._icons_started.is_set():
+            return
+        self._icons_started.set()
         threading.Thread(
             target=apply_icons_with_retry,
             kwargs={
@@ -172,6 +181,37 @@ class KeywayDesktop:
         except Exception:
             pass
 
+    def _server_error_html(self) -> str:
+        """Fallback page shown when the embedded server fails to start."""
+        admin_url = self.server.admin_url()
+        return f"""<!doctype html>
+<html><head><meta charset="utf-8"><title>Keyway</title>
+<style>
+  body {{ font-family: "Segoe UI", system-ui, sans-serif; background: #f6f7f9;
+         color: #1f2329; display: flex; align-items: center; justify-content: center;
+         min-height: 100vh; margin: 0; }}
+  .card {{ background: #fff; border-radius: 12px; padding: 32px 36px; max-width: 520px;
+           box-shadow: 0 4px 24px rgba(0,0,0,.08); }}
+  h1 {{ font-size: 20px; margin: 0 0 12px; }}
+  p, li {{ font-size: 14px; line-height: 1.7; color: #4b5563; }}
+  code {{ background: #f3f4f6; padding: 1px 6px; border-radius: 4px; }}
+  a.btn {{ display: inline-block; margin-top: 16px; padding: 10px 22px; border-radius: 8px;
+           background: #2563eb; color: #fff; text-decoration: none; font-size: 14px; }}
+  a.btn:hover {{ background: #1d4ed8; }}
+</style></head><body>
+  <div class="card">
+    <h1>Keyway server failed to start</h1>
+    <p>The embedded Keyway server did not come up on <code>{self.server.url}</code>. Common causes:</p>
+    <ul>
+      <li>Another Keyway instance (or another app) is already listening on the port</li>
+      <li>A proxy/VPN is intercepting loopback connections</li>
+      <li>The data directory is not writable</li>
+    </ul>
+    <p>If the server came up late (slow machine), retry below. Otherwise quit from the system tray and relaunch.</p>
+    <a class="btn" href="{admin_url}">Retry</a>
+  </div>
+</body></html>"""
+
     def run(self) -> None:
         # Must run before any HWND is created so the taskbar uses our AppID.
         set_app_id(APP_ID)
@@ -187,15 +227,25 @@ class KeywayDesktop:
                 flush=True,
             )
 
-        url = self.server.admin_url()
-        self._window = webview.create_window(
-            self._status_text(),
-            url,
-            width=1100,
-            height=750,
-            min_size=(800, 600),
-            confirm_close=False,
-        )
+        if ok:
+            self._window = webview.create_window(
+                self._status_text(),
+                self.server.admin_url(),
+                width=1100,
+                height=750,
+                min_size=(800, 600),
+                confirm_close=False,
+            )
+        else:
+            # Show an actionable error page instead of a dead URL.
+            self._window = webview.create_window(
+                "Keyway — Server Failed to Start",
+                html=self._server_error_html(),
+                width=900,
+                height=640,
+                min_size=(800, 600),
+                confirm_close=False,
+            )
         self._window.events.closing += self._on_closing
         try:
             self._window.events.shown += self._on_shown
@@ -204,15 +254,8 @@ class KeywayDesktop:
 
         threading.Thread(target=self._poll_status, daemon=True).start()
         self._start_tray()
-        # Fallback if shown event never fires
-        threading.Thread(
-            target=apply_icons_with_retry,
-            kwargs={
-                "icon_path": _ICON_PATH,
-                "png_path": _LOGO_PNG if os.path.exists(_LOGO_PNG) else None,
-            },
-            daemon=True,
-        ).start()
+        # Fallback if the shown event never fires
+        self._start_icon_thread()
 
         webview.start()
 

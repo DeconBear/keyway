@@ -134,7 +134,13 @@ async def _handle_http_fetch(arguments: dict[str, Any], provider: dict[str, Any]
     url = str(arguments.get("url") or "").strip()
     if not url.startswith(("http://", "https://")):
         return json.dumps({"error": "url must start with http:// or https://"}, ensure_ascii=False)
-    max_chars = int(arguments.get("max_chars", 4000) or 4000)
+    try:
+        max_chars = int(arguments.get("max_chars", 4000) or 4000)
+    except (TypeError, ValueError):
+        return json.dumps(
+            {"error": f"max_chars must be an integer, got {arguments.get('max_chars')!r}"},
+            ensure_ascii=False,
+        )
     max_chars = max(200, min(20000, max_chars))
     try:
         async with httpx.AsyncClient(trust_env=False, timeout=20, follow_redirects=True) as client:

@@ -94,6 +94,7 @@ class LLMKeyUpdateRequest(BaseModel):
     max_tokens: int | None = Field(default=None, ge=1)
     concurrency_limit: int | None = Field(default=None, ge=1)
     rpm_limit: int | None = Field(default=None, ge=1)
+    clear_expires_at: bool = False
     clear_max_requests: bool = False
     clear_max_tokens: bool = False
     clear_concurrency_limit: bool = False
@@ -135,6 +136,7 @@ class LLMTestRequest(BaseModel):
     """Admin-only LLM connectivity probe. Exactly one of provider_id / alias must be set."""
     provider_id: str | None = Field(default=None, max_length=64)
     alias: str | None = Field(default=None, max_length=128)
+    group_id: str | None = Field(default=None, max_length=64)
 
 
 class AdminLoginRequest(BaseModel):

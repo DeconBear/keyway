@@ -169,6 +169,34 @@ class ToolResultFlattener:
                 new_messages.append({"role": "user", "content": text})
                 continue
 
+            # OpenAI: an assistant message carrying tool_calls must have the
+            # calls flattened as well — once role:tool messages become user
+            # messages, a bare tool_calls field is an orphan that upstreams
+            # reject with a 400.
+            if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                calls_text = ToolResultFlattener._openai_tool_calls_text(msg["tool_calls"])
+                msg = {k: v for k, v in msg.items() if k != "tool_calls"}
+                content = msg.get("content")
+                if isinstance(content, str) and content.strip():
+                    msg["content"] = content + "\n" + calls_text
+                elif isinstance(content, list):
+                    # Multipart assistant content (text blocks + tool_calls) —
+                    # preserve text parts; do not drop them for call text alone.
+                    parts: list[str] = []
+                    for block in content:
+                        if isinstance(block, str) and block.strip():
+                            parts.append(block)
+                        elif isinstance(block, dict):
+                            text = block.get("text")
+                            if isinstance(text, str) and text.strip():
+                                parts.append(text)
+                    prefix = "\n".join(parts)
+                    msg["content"] = f"{prefix}\n{calls_text}" if prefix else calls_text
+                else:
+                    msg["content"] = calls_text
+                new_messages.append(msg)
+                continue
+
             content = msg.get("content")
             if isinstance(content, list):
                 new_blocks: list[dict[str, Any]] = []
@@ -178,6 +206,14 @@ class ToolResultFlattener:
                         new_blocks.append({
                             "type": "text",
                             "text": ToolResultFlattener._anthropic_tool_text(block),
+                        })
+                        changed = True
+                    elif isinstance(block, dict) and block.get("type") == "tool_use":
+                        # Anthropic: tool_use without a matching tool_result
+                        # (flattened above) is likewise an orphan -> 400.
+                        new_blocks.append({
+                            "type": "text",
+                            "text": ToolResultFlattener._anthropic_tool_use_text(block),
                         })
                         changed = True
                     else:
@@ -206,6 +242,30 @@ class ToolResultFlattener:
             content = json.dumps(content, ensure_ascii=False)
         prefix = f"tool_call_id={tool_call_id}" if tool_call_id else "tool"
         return f"[Tool result ({prefix}): {content}]"
+
+    @staticmethod
+    def _openai_tool_calls_text(tool_calls: list[Any]) -> str:
+        parts: list[str] = []
+        for tc in tool_calls:
+            if not isinstance(tc, dict):
+                continue
+            fn = tc.get("function") or {}
+            name = fn.get("name", "")
+            args = fn.get("arguments", "")
+            if not isinstance(args, str):
+                args = json.dumps(args, ensure_ascii=False)
+            parts.append(f"[Tool call: {name}({args})]")
+        return "\n".join(parts)
+
+    @staticmethod
+    def _anthropic_tool_use_text(block: dict[str, Any]) -> str:
+        name = block.get("name", "")
+        inp = block.get("input", {})
+        try:
+            args = json.dumps(inp, ensure_ascii=False)
+        except Exception:
+            args = str(inp)
+        return f"[Tool call: {name}({args})]"
 
     @staticmethod
     def _anthropic_tool_text(block: dict[str, Any]) -> str:

@@ -1,8 +1,8 @@
-"""Keyway self-signed LLM API key generation and verification.
+"""Keyway self-signed LLM API key generation.
 
-Format: db_sk_<32 url-safe chars>. The plaintext is shown ONCE at creation
-time; only the sha256 hex digest is stored. The first 12 chars are kept
-as `key_prefix` for display/identification.
+Format: db_sk_<43 url-safe chars> (secrets.token_urlsafe(32)). The plaintext
+is shown ONCE at creation time; only the sha256 hex digest is stored. The
+first 12 chars are kept as `key_prefix` for display/identification.
 """
 
 from __future__ import annotations
@@ -21,7 +21,3 @@ def hash_key(key: str) -> str:
 
 def key_prefix(key: str) -> str:
     return key[:12] + "..." if len(key) > 12 else key
-
-
-def verify_key(key: str, key_hash: str) -> bool:
-    return hash_key(key) == key_hash

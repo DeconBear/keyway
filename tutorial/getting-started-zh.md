@@ -23,9 +23,11 @@
 
 浏览器访问 `http://localhost:9233/`，输入 `KEYWAY_ADMIN_TOKEN` 登录。
 
+全新安装时，**总览**页会显示四步上手指引，带你完成下面第 2–5 步；配置齐全后自动消失。
+
 ## 第 2 步：添加上游 Provider
 
-在"default"组中，找到"Upstream Providers"，填写：
+进入 **分组 → default → 打开**，在**供应商**标签页点击 **+ 添加供应商**，填写：
 - **ID**：如 `deepseek`
 - **名称**：如 `DeepSeek`
 - **协议**：`openai` 或 `anthropic`
@@ -34,16 +36,18 @@
 
 ## 第 3 步：创建模型路由
 
-找到"Model Routes"，填写：
+切到**路由**标签页，点击 **+ 添加路由**，填写：
 - **Alias**：客户端使用的名称，如 `deepseek-v4-pro`
 - **Provider**：选择刚创建的 provider
 - **Upstream Model**：上游真实模型名，如 `deepseek-chat`
 
 ## 第 4 步：创建 API Key
 
-找到"Self-issued API Keys"，创建 Key。明文 `db_sk_...` 仅显示一次——请妥善保存。管理员可随时从列表重新获取明文。
+切到 **API 密钥**标签页，点击 **+ 创建密钥**。明文 `db_sk_...` 仅显示一次——请妥善保存。管理员可随时从列表重新获取明文。
 
 ## 第 5 步：连接客户端
+
+最快方式：点击任意路由或密钥上的**接入**按钮，会弹出按路由协议匹配好的接入片段（Claude Code、OpenAI SDK、Anthropic SDK、curl），Base URL、密钥和别名都已填好。也可以手动复制：
 
 ### Claude Code
 

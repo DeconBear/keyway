@@ -135,8 +135,13 @@ def load_or_create_config(root: Path | None = None) -> dict[str, str]:
 
 
 def port_is_free(host: str, port: int) -> bool:
+    # A listener that answers connections means "not free" — on Windows a
+    # second bind with SO_REUSEADDR would otherwise wrongly succeed.
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.settimeout(0.2)
+        if probe.connect_ex((host, port)) == 0:
+            return False
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             sock.bind((host, port))
         except OSError:
@@ -165,10 +170,14 @@ def get_autostart_command() -> str:
     if getattr(sys, "frozen", False):
         return f'"{sys.executable}"'
     main = Path(__file__).resolve().parent / "main.py"
-    return f'"{sys.executable}" "{main}"'
+    # Prefer pythonw.exe so login autostart doesn't pop a console window.
+    pythonw = Path(sys.executable).with_name("pythonw.exe")
+    exe = pythonw if pythonw.exists() else Path(sys.executable)
+    return f'"{exe}" "{main}"'
 
 
 def is_autostart_enabled() -> bool:
+    """True only when the Run key exists AND points at this installation."""
     if sys.platform != "win32":
         return False
     try:
@@ -179,8 +188,8 @@ def is_autostart_enabled() -> bool:
             0,
             winreg.KEY_READ,
         ) as key:
-            winreg.QueryValueEx(key, windows_run_key_name())
-            return True
+            value, _ = winreg.QueryValueEx(key, windows_run_key_name())
+            return str(value).strip() == get_autostart_command()
     except OSError:
         return False
 

@@ -82,6 +82,7 @@ class FusionOrchestrator:
 
         result = await judge_fn(
             req_body, valid, judge_alias, group_id, api_key_id, fusion_id, proto,
+            timeout_seconds,
         )
         return {"result": result, "members": members, "fusion_id": fusion_id}
 
@@ -101,22 +102,34 @@ class FusionOrchestrator:
             timeout=timeout_seconds,
         )
 
+    async def _judge(
+        self, req_body: dict[str, Any],
+        valid: list[tuple[str, str, dict[str, Any]]],
+        judge_alias: str, group_id: str,
+        api_key_id: str | None, fusion_id: str, protocol: str,
+        timeout_seconds: int, instruction: str,
+    ) -> dict[str, Any]:
+        prompt = self._build_judge_prompt(req_body, valid, protocol, instruction=instruction)
+        return await self._call_judge(
+            prompt, judge_alias, group_id, api_key_id, fusion_id, protocol,
+            timeout_seconds,
+        )
+
     async def _compare_and_synthesize(
         self, req_body: dict[str, Any],
         valid: list[tuple[str, str, dict[str, Any]]],
         judge_alias: str, group_id: str,
         api_key_id: str | None, fusion_id: str, protocol: str,
+        timeout_seconds: int = 30,
     ) -> dict[str, Any]:
-        prompt = self._build_judge_prompt(
-            req_body, valid, protocol,
+        return await self._judge(
+            req_body, valid, judge_alias, group_id, api_key_id, fusion_id,
+            protocol, timeout_seconds,
             instruction=(
                 "You are a judge. Below are candidate answers from multiple models "
                 "to the same question. Synthesize the best possible answer by picking "
                 "the best parts from each candidate. Return only your synthesized answer."
             ),
-        )
-        return await self._call_judge(
-            prompt, judge_alias, group_id, api_key_id, fusion_id, protocol,
         )
 
     async def _majority_vote(
@@ -124,9 +137,11 @@ class FusionOrchestrator:
         valid: list[tuple[str, str, dict[str, Any]]],
         judge_alias: str, group_id: str,
         api_key_id: str | None, fusion_id: str, protocol: str,
+        timeout_seconds: int = 30,
     ) -> dict[str, Any]:
-        prompt = self._build_judge_prompt(
-            req_body, valid, protocol,
+        return await self._judge(
+            req_body, valid, judge_alias, group_id, api_key_id, fusion_id,
+            protocol, timeout_seconds,
             instruction=(
                 "You are a judge. Below are candidate answers from multiple models "
                 "to the same question. Identify the most common or consensus answer. "
@@ -134,26 +149,22 @@ class FusionOrchestrator:
                 "the best answer. Return only your final answer."
             ),
         )
-        return await self._call_judge(
-            prompt, judge_alias, group_id, api_key_id, fusion_id, protocol,
-        )
 
     async def _ranked(
         self, req_body: dict[str, Any],
         valid: list[tuple[str, str, dict[str, Any]]],
         judge_alias: str, group_id: str,
         api_key_id: str | None, fusion_id: str, protocol: str,
+        timeout_seconds: int = 30,
     ) -> dict[str, Any]:
-        prompt = self._build_judge_prompt(
-            req_body, valid, protocol,
+        return await self._judge(
+            req_body, valid, judge_alias, group_id, api_key_id, fusion_id,
+            protocol, timeout_seconds,
             instruction=(
                 "You are a judge. Below are candidate answers from multiple models "
                 "to the same question. Rank them from best to worst, then return only "
                 "the best answer verbatim."
             ),
-        )
-        return await self._call_judge(
-            prompt, judge_alias, group_id, api_key_id, fusion_id, protocol,
         )
 
     @staticmethod
@@ -191,13 +202,8 @@ class FusionOrchestrator:
             + "\n".join(candidate_texts)
         )
 
-        if protocol == "anthropic":
-            return {
-                "model": "",
-                "messages": [{"role": "user", "content": judge_content}],
-                "max_tokens": 1024,
-                "temperature": 0,
-            }
+        # The judge request body is protocol-agnostic here: complete()
+        # renders it for the judge provider's own protocol downstream.
         return {
             "model": "",
             "messages": [{"role": "user", "content": judge_content}],
@@ -208,7 +214,7 @@ class FusionOrchestrator:
     async def _call_judge(
         self, prompt_body: dict[str, Any], judge_alias: str,
         group_id: str, api_key_id: str | None, fusion_id: str,
-        protocol: str,
+        protocol: str, timeout_seconds: int = 30,
     ) -> dict[str, Any]:
         prompt_body["model"] = judge_alias
         resolved = self.router.resolve_route(
@@ -220,10 +226,19 @@ class FusionOrchestrator:
                 f"in group '{group_id or 'default'}'"
             )
         try:
-            return await self.router.complete(
-                prompt_body, api_key_id=api_key_id, protocol=protocol,
-                resolved=resolved, fusion_id=fusion_id,
+            return await asyncio.wait_for(
+                self.router.complete(
+                    prompt_body, api_key_id=api_key_id, protocol=protocol,
+                    resolved=resolved, fusion_id=fusion_id,
+                ),
+                timeout=timeout_seconds,
             )
+        except UpstreamError:
+            raise
+        except asyncio.TimeoutError:
+            raise UpstreamError(
+                f"judge model timed out after {timeout_seconds}s", status_code=504,
+            ) from None
         except Exception as exc:
             raise UpstreamError(f"judge model failed: {exc}") from exc
 

@@ -7,390 +7,569 @@
   <link rel="icon" href="/assets/favicon.ico" sizes="any" />
   <link rel="icon" href="/assets/logo.svg" type="image/svg+xml" />
   <link rel="apple-touch-icon" href="/assets/logo-192.png" />
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet" />
+  <script>
+    (function () {
+      try {
+        var t = localStorage.getItem("keyway_theme");
+        if (t === "dark" || t === "light") document.documentElement.setAttribute("data-theme", t);
+      } catch (e) {}
+    })();
+  </script>
+  <link rel="stylesheet" href="/assets/app.css" />
   <script src="/assets/i18n.js"></script>
-  <style>
-    :root { --bg: #fafafa; --card: #fff; --border: #e0e0e0; --divider: #ececec; --text: #111; --muted: #6b6b6b; --accent: #111; --err: #b00; --ok: #0a6; }
-    @media (prefers-color-scheme: dark) { :root { --bg: #0d0d0d; --card: #161616; --border: #2a2a2a; --divider: #2a2a2a; --text: #f0f0f0; --muted: #8a8a8a; --accent: #f0f0f0; } }
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { font-family: 'IBM Plex Sans', sans-serif; background: var(--bg); color: var(--text); font-size: 14px; line-height: 1.5; }
-    .topbar { position: sticky; top: 0; z-index: 10; display: flex; align-items: center; justify-content: space-between; padding: 0.7rem 1.5rem; background: var(--card); border-bottom: 1px solid var(--border); }
-    .topbar .brand { display: flex; align-items: center; gap: 0.55rem; }
-    .topbar .brand img.logo { width: 28px; height: 28px; border-radius: 7px; display: block; }
-    .topbar .brand .name { font-size: 1.2rem; font-weight: 600; letter-spacing: -0.01em; }
-    .topbar .brand .sub { font-size: 0.75rem; color: var(--muted); }
-    .topbar nav { display: flex; gap: 0.8rem; align-items: center; }
-    .topbar nav a { font-size: 0.85rem; color: var(--text); text-decoration: none; padding: 0.3rem 0.6rem; border-radius: 5px; }
-    .topbar nav a:hover { background: var(--bg); }
-    .shell { max-width: 980px; margin: 0 auto; padding: 1.5rem; }
-    .section { margin-bottom: 1.75rem; padding: 1.1rem 1.25rem; border: 1px solid var(--border); border-radius: 10px; background: var(--card); }
-    .section h2 { font-size: 1.05rem; font-weight: 500; margin: 0 0 0.9rem; }
-    .section .meta { font-size: 0.78rem; color: var(--muted); margin-bottom: 0.6rem; }
-    .form { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 0.5rem 0.6rem; align-items: end; margin-bottom: 0.75rem; }
-    .form label { font-size: 0.75rem; color: var(--muted); display: block; margin-bottom: 0.2rem; }
-    .form input, .form select, .form textarea { width: 100%; padding: 0.45rem 0.6rem; font-size: 0.85rem; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); font-family: inherit; }
-    .form textarea { resize: vertical; min-height: 2.5rem; }
-    .form .full { grid-column: 1 / -1; }
-    .form .actions { grid-column: 1 / -1; display: flex; gap: 0.4rem; }
-    .form button { padding: 0.5rem 1rem; font-size: 0.88rem; border-radius: 6px; cursor: pointer; font-family: inherit; }
-    .form button.primary { background: var(--accent); color: var(--bg); border: 1px solid var(--accent); }
-    .form button.primary:hover { opacity: 0.85; }
-    .form button.ghost { background: var(--card); color: var(--text); border: 1px solid var(--border); }
-    .form button.ghost:hover { background: var(--bg); }
-    .list { display: flex; flex-direction: column; gap: 0.4rem; }
-    .list:empty::before { content: "(empty)"; color: var(--muted); font-size: 0.85rem; padding: 0.4rem 0; }
-    .item { display: flex; gap: 0.5rem; align-items: center; padding: 0.55rem 0.7rem; border: 1px solid var(--divider); border-radius: 6px; background: var(--bg); font-size: 0.85rem; }
-    .item .id { font-family: 'IBM Plex Mono', monospace; font-size: 0.8rem; color: var(--muted); }
-    .item .grow { flex: 1; min-width: 0; }
-    .item .grow .ellipsis { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .item button { padding: 0.3rem 0.7rem; font-size: 0.78rem; border: 1px solid var(--border); border-radius: 5px; background: var(--card); color: var(--text); cursor: pointer; }
-    .item button:hover { background: var(--bg); }
-    .item button.danger { color: var(--err); }
-    .item button.danger:hover { background: #fce4e4; }
-    @media (prefers-color-scheme: dark) { .item button.danger:hover { background: #2a0d0d; } }
-    .log-table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
-    .log-table th, .log-table td { padding: 0.4rem 0.5rem; border-bottom: 1px solid var(--divider); text-align: left; vertical-align: top; }
-    .log-table th { font-weight: 500; color: var(--muted); background: var(--bg); }
-    .log-table td .mono { font-family: 'IBM Plex Mono', monospace; font-size: 0.78rem; }
-    .log-table td.err { color: var(--err); }
-    .status { font-size: 0.82rem; color: var(--muted); margin-left: 0.4rem; }
-    .status.ok { color: var(--ok); }
-    .status.err { color: var(--err); }
-    .toolbar { display: flex; justify-content: space-between; align-items: baseline; margin: 1.5rem 0 1.25rem; padding-bottom: 0.75rem; border-bottom: 1px solid var(--divider); }
-    .toolbar h1 { font-size: 1.5rem; font-weight: 500; }
-    .toolbar .actions button { padding: 0.4rem 0.85rem; font-size: 0.85rem; border: 1px solid var(--accent); border-radius: 6px; background: var(--accent); color: var(--bg); cursor: pointer; }
-    .toolbar .actions button:hover { opacity: 0.85; }
-    .gate { max-width: 480px; margin: 3rem auto; padding: 1.5rem; border: 1px solid var(--border); border-radius: 10px; background: var(--card); text-align: center; }
-    .gate h1 { font-size: 1.25rem; margin: 0 0 0.6rem; }
-    .gate p { margin: 0; color: var(--muted); }
-    .gate a { font-size: 0.85rem; }
-    .modal-overlay { position: fixed; inset: 0; z-index: 50; display: flex; align-items: center; justify-content: center; padding: 1rem; background: rgba(0,0,0,0.4); opacity: 0; pointer-events: none; transition: opacity 0.15s ease; }
-    .modal-overlay.open { opacity: 1; pointer-events: auto; }
-    .modal { width: 100%; max-width: 420px; padding: 1.4rem 1.5rem; border: 1px solid var(--border); border-radius: 12px; background: var(--card); box-shadow: 0 12px 40px rgba(0,0,0,0.2); transform: translateY(8px); transition: transform 0.15s ease; }
-    .modal-overlay.open .modal { transform: translateY(0); }
-    .modal h2 { font-size: 1.1rem; font-weight: 500; margin: 0 0 0.3rem; }
-    .modal .modal-sub { font-size: 0.8rem; color: var(--muted); margin: 0 0 1.1rem; }
-    .modal label { font-size: 0.75rem; color: var(--muted); display: block; margin-bottom: 0.2rem; }
-    .modal input { width: 100%; padding: 0.5rem 0.65rem; font-size: 0.88rem; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); font-family: inherit; margin-bottom: 0.8rem; }
-    .modal input:focus { outline: none; border-color: var(--accent); }
-    .modal input.mono { font-family: 'IBM Plex Mono', monospace; font-size: 0.84rem; }
-    .modal .modal-hint { font-size: 0.72rem; color: var(--muted); margin: -0.5rem 0 0.9rem; line-height: 1.45; }
-    .modal .modal-actions { display: flex; gap: 0.5rem; justify-content: flex-end; margin-top: 0.2rem; }
-    .modal button { padding: 0.5rem 1.1rem; font-size: 0.88rem; border-radius: 6px; cursor: pointer; font-family: inherit; }
-    .modal button.primary { background: var(--accent); color: var(--bg); border: 1px solid var(--accent); }
-    .modal button.primary:hover { opacity: 0.85; }
-    .modal button.ghost { background: var(--card); color: var(--text); border: 1px solid var(--border); }
-    .modal button.ghost:hover { background: var(--bg); }
-    .modal .modal-error { font-size: 0.78rem; color: var(--err); min-height: 1rem; margin-bottom: 0.6rem; }
-    .pill { display: inline-block; font-size: 0.7rem; padding: 1px 6px; border-radius: 3px; }
-    .pill.openai { background: #e0e7ff; color: #3730a3; }
-    .pill.anthropic { background: #fef3c7; color: #92400e; }
-    .pill.enabled { background: #dcfce7; color: #166534; }
-    .pill.disabled { background: #fee2e2; color: #991b1b; }
-    .pill.default { background: #e0e7ff; color: #3730a3; }
-    .pill.mode { background: #e0f2fe; color: #075985; }
-@media (prefers-color-scheme: dark) { .pill.openai { background: #1a1a3a; color: #a5b4fc; } .pill.anthropic { background: #3a2a0a; color: #fcd34d; } .pill.enabled { background: #0a3a1a; color: #4ade80; } .pill.disabled { background: #3a0a0a; color: #f87171; } .pill.default { background: #1a1a3a; color: #a5b4fc; } .pill.mode { background: #0c2a3a; color: #7dd3fc; } }
-  </style>
 </head>
 <body>
-  <header class="topbar">
-    <div class="brand">
-      <img class="logo" src="/assets/logo.svg" width="28" height="28" alt="Keyway" />
-      <span class="name">Keyway</span>
-      <span class="sub" data-i18n="brand.sub">LLM Router</span>
+  <!-- auth gate -->
+  <div id="gate" class="center-page" style="display:none;">
+    <div class="card gate-card">
+      <img src="/assets/logo.svg" width="48" height="48" alt="Keyway" style="border-radius:12px;" />
+      <h1 style="margin:0.8rem 0 0.4rem;" data-i18n="gate.title">Authentication required</h1>
+      <p class="muted">
+        <span data-i18n="gate.body">Please log in with your admin token.</span>
+        <a href="/" data-i18n="gate.login">log in</a>
+      </p>
     </div>
-    <nav>
-      <a href="#" id="nav-home" data-i18n="nav.home">Home</a>
-      <a href="https://deconbear.github.io/keyway/" data-i18n="nav.docs">Docs</a>
-      <a href="#view=settings" id="nav-settings" data-i18n="nav.settings">Settings</a>
-      <a href="#" id="logout-link" data-i18n="nav.logout">Logout</a>
-    </nav>
-  </header>
+  </div>
 
-  <main class="shell">
-    <div id="gate" class="gate" style="display:none;">
-      <h1 data-i18n="gate.title">Authentication required</h1>
-      <p><span data-i18n="gate.body">Please log in with your admin token.</span> <a href="/" data-i18n="gate.login">log in</a></p>
-    </div>
+  <div id="app" class="layout" style="display:none;">
+    <aside class="sidebar">
+      <div class="brand">
+        <img src="/assets/logo.svg" width="30" height="30" alt="Keyway" />
+        <span class="name">Keyway</span>
+        <span class="sub" data-i18n="brand.sub">LLM Router</span>
+      </div>
+      <nav class="side-nav">
+        <a class="side-link" data-nav="dashboard" href="#/">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="1.5" y="1.5" width="5.5" height="5.5" rx="1"/><rect x="9" y="1.5" width="5.5" height="5.5" rx="1"/><rect x="1.5" y="9" width="5.5" height="5.5" rx="1"/><rect x="9" y="9" width="5.5" height="5.5" rx="1"/></svg>
+          <span data-i18n="nav.dashboard">Dashboard</span>
+        </a>
+        <a class="side-link" data-nav="groups" href="#/groups">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 1.5 14.5 5 8 8.5 1.5 5 8 1.5Z"/><path d="M1.5 8 8 11.5 14.5 8"/><path d="M1.5 11 8 14.5 14.5 11"/></svg>
+          <span data-i18n="nav.groups">Groups</span>
+        </a>
+        <a class="side-link" data-nav="logs" href="#/logs">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 3.5h12M2 8h12M2 12.5h7"/></svg>
+          <span data-i18n="nav.logs">Logs</span>
+        </a>
+        <a class="side-link" data-nav="settings" href="#/settings">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="2.2"/><path d="M8 1.5v1.8M8 12.7v1.8M1.5 8h1.8M12.7 8h1.8M3.4 3.4l1.3 1.3M11.3 11.3l1.3 1.3M12.6 3.4l-1.3 1.3M4.7 11.3l-1.3 1.3"/></svg>
+          <span data-i18n="nav.settings">Settings</span>
+        </a>
+        <a class="side-link" href="https://deconbear.github.io/keyway/" target="_blank" rel="noreferrer">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M6 3.5H3v10h10v-3"/><path d="M9.5 2.5h4v4"/><path d="M13.5 2.5 7.5 8.5"/></svg>
+          <span data-i18n="nav.docs">Docs</span>
+        </a>
+      </nav>
+      <div class="side-foot">
+        <div class="side-foot-row">
+          <select id="foot-lang" class="select" aria-label="Language">
+            <option value="en">English</option>
+            <option value="zh">中文</option>
+          </select>
+          <select id="foot-theme" class="select" aria-label="Theme">
+            <option value="auto" data-i18n="theme.auto">Auto</option>
+            <option value="light" data-i18n="theme.light">Light</option>
+            <option value="dark" data-i18n="theme.dark">Dark</option>
+          </select>
+        </div>
+        <button id="logout-btn" class="btn btn-ghost btn-sm" type="button" data-i18n="nav.logout">Logout</button>
+      </div>
+    </aside>
 
-    <div id="shell" style="display:none;">
+    <main class="main">
+      <!-- ============ dashboard ============ -->
+      <section id="view-dashboard" style="display:none;">
+        <div class="page-head">
+          <h1 data-i18n="dash.title">Dashboard</h1>
+          <span class="spacer"></span>
+          <button id="dash-wizard-btn" class="btn btn-ghost btn-sm" type="button" data-i18n="dash.setupGuide">Setup guide</button>
+          <button id="dash-refresh" class="btn btn-ghost btn-sm" type="button" data-i18n="dash.refresh">Refresh</button>
+        </div>
 
-      <div id="list-view" style="display:none;">
-        <div class="toolbar">
-          <h1 data-i18n="home.title">Routing Groups</h1>
-          <div class="actions">
-            <button data-action="new-group" type="button" data-i18n="home.newGroup">+ New Group</button>
+        <div id="wizard-card" class="card" style="display:none;">
+          <div class="card-head">
+            <span class="card-title" data-i18n="wizard.title">Get started in 4 steps</span>
+            <span class="spacer"></span>
+            <button id="wizard-hide" class="btn btn-ghost btn-sm" type="button" data-i18n="wizard.hide">Hide</button>
+          </div>
+          <p class="card-meta" data-i18n="wizard.sub">Follow these steps to route your first request through Keyway.</p>
+          <div class="steps" id="wizard-steps"></div>
+        </div>
+
+        <div class="stat-grid" id="dash-gateway"></div>
+
+        <div class="card">
+          <div class="card-head"><span class="card-title" id="dash-usage-title"></span></div>
+          <div class="stat-grid" id="dash-usage" style="margin-bottom:1rem;"></div>
+          <div class="two-col">
+            <div>
+              <div class="card-meta" style="margin-bottom:0.55rem;" data-i18n="dash.byRoute">Requests by route</div>
+              <div class="bars" id="dash-bars"></div>
+            </div>
+            <div>
+              <div class="card-meta" style="margin-bottom:0.55rem;" data-i18n="dash.recentErrors">Recent upstream errors</div>
+              <div class="list" id="dash-errors"></div>
+            </div>
           </div>
         </div>
-        <section class="section" id="overview" style="margin-bottom:1.25rem;">
-          <h2 data-i18n="overview.title">Gateway Status</h2>
-          <p class="meta" data-i18n="overview.meta">Server health, open circuits, and recent upstream errors at a glance.</p>
-          <div id="overview-summary" style="display:flex;flex-wrap:wrap;gap:0.75rem;margin-bottom:0.75rem;font-size:0.85rem;"></div>
-          <div id="overview-errors" class="list"></div>
-          <div style="margin-top:0.5rem;">
-            <button type="button" id="overview-refresh" style="padding:0.35rem 0.75rem;font-size:0.82rem;border:1px solid var(--border);border-radius:5px;background:var(--card);color:var(--text);cursor:pointer;" data-i18n="overview.refresh">Refresh</button>
-            <span id="overview-status" class="status"></span>
+
+        <div class="card">
+          <div class="card-head">
+            <span class="card-title" data-i18n="dash.recentRequests">Recent requests</span>
+            <span class="spacer"></span>
+            <a href="#/logs" style="font-size:0.82rem;">→ <span data-i18n="nav.logs">Logs</span></a>
           </div>
-        </section>
+          <div class="table-wrap">
+            <table class="table">
+              <thead><tr>
+                <th data-i18n="dash.col.time">Time</th>
+                <th data-i18n="dash.col.alias">Alias</th>
+                <th data-i18n="dash.col.provider">Provider</th>
+                <th data-i18n="dash.col.status">Status</th>
+                <th data-i18n="dash.col.latency">Latency</th>
+                <th data-i18n="dash.col.tokens">Tokens</th>
+              </tr></thead>
+              <tbody id="dash-recent"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ groups ============ -->
+      <section id="view-groups" style="display:none;">
+        <div class="page-head">
+          <h1 data-i18n="groups.title">Routing Groups</h1>
+          <span class="spacer"></span>
+          <button id="groups-new" class="btn btn-primary" type="button" data-i18n="groups.new">+ New Group</button>
+        </div>
+        <p class="card-meta" data-i18n="groups.subtitle">Each group is an isolated bundle of providers, routes, keys and tools.</p>
         <div id="group-list" class="list"></div>
-      </div>
+      </section>
 
-      <div id="settings-view" style="display:none;">
-        <div class="toolbar">
-          <h1 data-i18n="settings.title">Settings</h1>
-          <div class="actions">
-            <button type="button" id="settings-back" class="ghost" style="padding:0.4rem 0.85rem;font-size:0.85rem;border:1px solid var(--border);border-radius:6px;background:var(--card);color:var(--text);cursor:pointer;" data-i18n="settings.back">← Back to groups</button>
+      <!-- ============ group detail ============ -->
+      <section id="view-group" style="display:none;">
+        <div class="crumbs"><a href="#/groups" data-i18n="nav.groups">Groups</a> / <span id="group-crumb"></span></div>
+        <div class="page-head" id="group-head" style="gap:0.5rem;"></div>
+        <div class="tabs" id="group-tabs">
+          <button class="tab active" data-tab="providers" type="button" data-i18n="tabs.providers">Providers</button>
+          <button class="tab" data-tab="routes" type="button" data-i18n="tabs.routes">Routes</button>
+          <button class="tab" data-tab="keys" type="button" data-i18n="tabs.keys">API Keys</button>
+          <button class="tab" data-tab="tools" type="button" data-i18n="tabs.tools">Tools</button>
+          <button class="tab" data-tab="health" type="button" data-i18n="tabs.health">Health</button>
+        </div>
+
+        <!-- providers -->
+        <div id="tab-providers" class="tab-panel">
+          <div class="card">
+            <div class="card-head">
+              <span class="card-title" data-i18n="prov.title">Upstream Providers</span>
+              <span class="spacer"></span>
+              <button id="provider-add-btn" class="btn btn-primary btn-sm" type="button" data-i18n="prov.add">+ Add Provider</button>
+            </div>
+            <p class="card-meta" data-i18n="prov.meta">Each provider is a real upstream LLM service. Its API key is stored encrypted.</p>
+            <form id="provider-form" style="display:none;" class="divider-dash">
+              <input type="hidden" id="provider-edit-id" />
+              <div id="provider-edit-banner" class="inline-note" style="display:none;" data-i18n="prov.editBanner">Editing — fill the API key field only to replace it; leave empty to keep the current key.</div>
+              <div class="form-grid">
+                <div class="field"><label data-i18n="prov.id">ID (slug)</label><input class="input mono" name="provider_id" id="provider-id-input" required pattern="[a-z0-9._-]{1,64}" placeholder="deepseek" /></div>
+                <div class="field"><label data-i18n="prov.name">Name</label><input class="input" name="name" required placeholder="DeepSeek" /></div>
+                <div class="field"><label data-i18n="prov.protocol">Protocol</label>
+                  <select class="select" name="protocol" id="provider-protocol">
+                    <option value="openai" selected data-i18n="proto.openai">OpenAI compatible (chat/completions + Bearer)</option>
+                    <option value="anthropic" data-i18n="proto.anthropic">Anthropic compatible (/v1/messages + x-api-key)</option>
+                  </select>
+                </div>
+                <div class="field full"><label data-i18n="prov.baseUrl">Base URL</label><input class="input mono" name="base_url" required type="url" placeholder="https://api.deepseek.com/v1" /></div>
+                <div class="field full"><label data-i18n="prov.apiKey">API Key</label><input class="input mono" name="api_key" type="password" autocomplete="new-password" placeholder="sk-..." /></div>
+                <div class="field full"><label data-i18n="prov.note">Note (optional)</label><input class="input" name="note" placeholder="local test" /></div>
+              </div>
+              <div class="form-actions">
+                <button type="submit" class="btn btn-primary" id="provider-submit" data-i18n="prov.submit">Add Provider</button>
+                <button type="button" class="btn btn-ghost" id="provider-cancel" data-i18n="prov.cancel">Cancel</button>
+                <button type="button" class="btn btn-ghost" id="provider-test" style="display:none;" data-i18n="prov.test">Test</button>
+              </div>
+            </form>
+            <div id="provider-list" class="list" style="margin-top:0.5rem;"></div>
           </div>
-        </div>
-        <section class="section">
-          <p class="meta" data-i18n="settings.meta">Application preferences for this Keyway instance.</p>
-          <form id="settings-form" class="form" style="max-width:420px;">
-            <div class="full">
-              <label data-i18n="settings.language">Language</label>
-              <select id="settings-language" name="language">
-                <option value="en" data-i18n="settings.lang.en">English</option>
-                <option value="zh" data-i18n="settings.lang.zh">中文 (Chinese)</option>
-              </select>
-              <p class="meta" style="margin-top:0.45rem;" data-i18n="settings.languageHelp">Default is English. Choose Chinese to switch the admin UI.</p>
-            </div>
-            <div class="actions">
-              <button type="submit" class="primary" data-i18n="settings.save">Save settings</button>
-              <span id="settings-status" class="status"></span>
-            </div>
-          </form>
-        </section>
-      </div>
 
-      <div id="detail-view" style="display:none;">
-        <div id="detail-head" style="margin: 1.5rem 0 1.25rem; padding-bottom: 0.75rem; border-bottom: 1px solid var(--divider); display:flex; justify-content:space-between; align-items:center; gap:0.5rem;">
-          <span id="detail-head-info" style="flex:1; min-width:0;"></span>
-          <button data-action="new-group" type="button" style="background:transparent;border:1px solid var(--border);color:var(--text);padding:0.3rem 0.7rem;border-radius:5px;cursor:pointer;font-size:0.82rem;">+ New Group</button>
-        </div>
-
-        <section class="section" id="providers">
-          <h2 data-i18n="providers.title">Upstream Providers</h2>
-          <p class="meta" data-i18n="providers.meta">Each provider is an upstream service (e.g. DeepSeek / OpenAI / Anthropic). API key is shown once on creation; as admin you can view/copy it later.</p>
-          <form id="provider-form" class="form">
-            <input type="hidden" name="_edit_id" id="provider-edit-id" />
-            <div><label data-i18n="label.id">ID (slug)</label><input name="provider_id" id="provider-id-input" required pattern="[a-z0-9._-]{1,64}" placeholder="deepseek" /></div>
-            <div><label data-i18n="label.name">Name</label><input name="name" required placeholder="DeepSeek" /></div>
-            <div><label data-i18n="label.protocol">Protocol</label>
-              <select name="protocol" id="provider-protocol">
-                <option value="openai" selected data-i18n="proto.openai">OpenAI compatible (chat/completions + Bearer)</option>
-                <option value="anthropic" data-i18n="proto.anthropic">Anthropic compatible (/v1/messages + x-api-key)</option>
-              </select>
+          <div class="card" id="credential-panel" style="display:none;">
+            <div class="card-head">
+              <span class="card-title" data-i18n="cred.title">Upstream Key Pool</span>
+              <span class="spacer"></span>
+              <button type="button" id="credential-close" class="btn btn-ghost btn-sm" data-i18n="common.close">Close</button>
             </div>
-            <div class="full"><label data-i18n="label.baseUrl">Base URL</label><input name="base_url" id="provider-base-url" required type="url" placeholder="https://api.deepseek.com/v1" /></div>
-            <div class="full"><label data-i18n="label.apiKey">API Key</label><input name="api_key" id="provider-api-key" type="password" autocomplete="new-password" placeholder="sk-..." /></div>
-            <div class="full"><label data-i18n="label.note">Note (optional)</label><input name="note" placeholder="local test" /></div>
-            <div class="actions">
-              <button type="submit" class="primary" id="provider-submit" data-i18n="btn.addProvider">Add Provider</button>
-              <button type="button" id="provider-cancel" class="ghost" style="display:none;" data-i18n="btn.cancel">Cancel</button>
-              <button type="button" id="provider-test" class="ghost" style="display:none;" data-i18n="btn.test">Test</button>
-              <span id="provider-status" class="status"></span>
-            </div>
-          </form>
-          <div id="provider-list" class="list"></div>
-          <div id="credential-panel" style="display:none; margin-top: 1rem; padding: 0.85rem; border: 1px solid var(--border); border-radius: 8px; background: var(--card);">
-            <div style="display:flex; justify-content:space-between; align-items:center; gap:0.5rem; margin-bottom:0.5rem;">
-              <h3 style="margin:0; font-size:0.95rem;" data-i18n="creds.title">Upstream Key Pool</h3>
-              <button type="button" id="credential-close" class="ghost" data-i18n="btn.cancel">Close</button>
-            </div>
-            <p class="meta" id="credential-panel-meta" data-i18n="creds.meta">Multiple API keys for the same provider. Round-robin within priority; failover on 429/5xx.</p>
-            <form id="credential-form" class="form" style="margin-top:0.5rem;">
+            <p class="card-meta"><span data-i18n="cred.meta">Multiple API keys for one provider. Round-robin within a priority level; automatic failover on 429/5xx.</span> <strong id="credential-panel-meta"></strong></p>
+            <form id="credential-form">
               <input type="hidden" id="credential-provider-id" />
-              <div class="full"><label data-i18n="label.apiKey">API Key</label><input name="api_key" required type="password" autocomplete="new-password" placeholder="sk-..." /></div>
-              <div><label data-i18n="creds.label">Label</label><input name="label" placeholder="pool-2" /></div>
-              <div><label data-i18n="creds.priority">Priority</label><input name="priority" type="number" value="0" /></div>
-              <div class="actions">
-                <button type="submit" class="primary" data-i18n="creds.add">Add Key</button>
-                <span id="credential-status" class="status"></span>
+              <div class="form-grid">
+                <div class="field full"><label data-i18n="prov.apiKey">API Key</label><input class="input mono" name="api_key" required type="password" autocomplete="new-password" placeholder="sk-..." /></div>
+                <div class="field"><label data-i18n="cred.label">Label</label><input class="input" name="label" placeholder="pool-2" /></div>
+                <div class="field"><label data-i18n="cred.priority">Priority</label><input class="input" name="priority" type="number" value="0" /></div>
+              </div>
+              <div class="form-actions">
+                <button type="submit" class="btn btn-primary" data-i18n="cred.add">Add Key</button>
               </div>
             </form>
-            <div id="credential-list" class="list" style="margin-top:0.5rem;"></div>
+            <div id="credential-list" class="list" style="margin-top:0.6rem;"></div>
           </div>
-        </section>
-
-        <section class="section" id="routes">
-          <h2 data-i18n="routes.title">Model Routes</h2>
-          <p class="meta" data-i18n="routes.meta">An alias is the user-facing model name, routed to this group's provider upstream model. Modes: direct, auto-select, adapter, fusion.</p>
-          <form id="route-form" class="form">
-            <input type="hidden" name="_edit_id" id="route-edit-id" />
-            <div><label data-i18n="label.alias">Alias (client-facing)</label><input name="alias" required placeholder="deepseek-v4-pro" /></div>
-            <div><label data-i18n="label.provider">Provider</label><select name="provider_id" required id="route-provider-select"></select></div>
-            <div><label data-i18n="label.upstreamModel">Upstream Model</label><input name="upstream_model" required placeholder="deepseek-reasoner" /></div>
-            <div><label data-i18n="label.mode">Mode</label>
-              <select name="mode" id="route-mode">
-                <option value="direct" selected>direct</option>
-                <option value="auto-select">auto-select</option>
-                <option value="adapter">adapter</option>
-                <option value="fusion">fusion</option>
-              </select>
-            </div>
-            <div><label data-i18n="label.enabled">Enabled</label><select name="enabled"><option value="1" data-i18n="label.yes">Yes</option><option value="0" data-i18n="label.no">No</option></select></div>
-            <div class="full"><label data-i18n="label.upstreamPath">Upstream Path (for generation endpoints)</label><input name="upstream_path" placeholder="services/aigc/text2image/image-synthesis" /></div>
-            <div class="full" id="route-adapter-wrap" style="display:none;">
-              <label data-i18n="adapter.title">Adapter Config</label>
-              <div class="form" style="grid-template-columns: 1fr 1fr; gap: 0.5rem; margin-top: 0.35rem;">
-                <div><label data-i18n="adapter.visionAlias">Vision Alias</label><input id="adapter-vision-alias" placeholder="qwen-vl" /></div>
-                <div><label data-i18n="adapter.fallback">Fallback</label>
-                  <select id="adapter-fallback">
-                    <option value="error" selected>error</option>
-                    <option value="skip-image">skip-image</option>
-                  </select>
-                </div>
-              </div>
-              <details style="margin-top:0.4rem;">
-                <summary class="meta" style="cursor:pointer;" data-i18n="adapter.advanced">Advanced JSON</summary>
-                <textarea name="adapter_config" id="route-adapter-config" placeholder='{"vision_alias":"qwen-vl","fallback":"error"}'></textarea>
-              </details>
-            </div>
-            <div class="full" id="route-fusion-wrap" style="display:none;">
-              <label data-i18n="fusion.title">Fusion Config</label>
-              <div class="form" style="grid-template-columns: 1fr 1fr; gap: 0.5rem; margin-top: 0.35rem;">
-                <div><label data-i18n="fusion.judgeAlias">Judge Alias</label><input id="fusion-judge-alias" placeholder="judge" /></div>
-                <div><label data-i18n="fusion.strategy">Strategy</label>
-                  <select id="fusion-strategy">
-                    <option value="compare_and_synthesize" selected>compare_and_synthesize</option>
-                    <option value="majority_vote">majority_vote</option>
-                    <option value="ranked">ranked</option>
-                  </select>
-                </div>
-                <div><label data-i18n="fusion.minCandidates">Min Candidates</label><input id="fusion-min-candidates" type="number" value="2" min="1" /></div>
-                <div><label data-i18n="fusion.timeout">Timeout (seconds)</label><input id="fusion-timeout" type="number" value="30" min="1" /></div>
-              </div>
-              <details style="margin-top:0.4rem;">
-                <summary class="meta" style="cursor:pointer;" data-i18n="fusion.advanced">Advanced JSON</summary>
-                <textarea name="fusion_config" id="route-fusion-config" placeholder='{"judge_alias":"judge","strategy":"compare_and_synthesize","min_candidates":2}'></textarea>
-              </details>
-            </div>
-            <div class="full"><label data-i18n="label.note">Note (optional)</label><input name="note" /></div>
-            <div class="actions">
-              <button type="submit" class="primary" id="route-submit" data-i18n="btn.addRoute">Add Route</button>
-              <button type="button" id="route-cancel" class="ghost" style="display:none;" data-i18n="btn.cancel">Cancel</button>
-              <span id="route-status" class="status"></span>
-            </div>
-          </form>
-          <div id="route-list" class="list"></div>
-          <div id="route-providers-panel" style="display:none; margin-top: 0.9rem; padding-top: 0.9rem; border-top: 1px dashed var(--divider);">
-            <h3 style="font-size:0.95rem;font-weight:500;margin:0 0 0.5rem;"><span data-i18n="rp.title">Route Providers</span> <span id="rp-route-label" style="color:var(--muted);font-weight:400;font-size:0.8rem;"></span></h3>
-            <p class="meta" data-i18n="rp.meta">Extra providers for auto-select / fusion. Priority: lower number = higher priority.</p>
-            <form id="rp-form" class="form">
-              <input type="hidden" id="rp-route-id" />
-              <div><label data-i18n="label.provider">Provider</label><select id="rp-provider-select" required></select></div>
-              <div><label data-i18n="label.upstreamModel">Upstream Model</label><input id="rp-upstream-model" required placeholder="model-id" /></div>
-              <div><label data-i18n="label.priority">Priority</label><input id="rp-priority" type="number" value="1" /></div>
-              <div class="actions">
-                <button type="submit" class="primary" data-i18n="btn.addProviderRp">Add Provider</button>
-                <span id="rp-status" class="status"></span>
-              </div>
-            </form>
-            <div id="rp-list" class="list"></div>
-          </div>
-        </section>
-
-        <section class="section" id="health">
-          <h2 data-i18n="health.title">Provider Health</h2>
-          <p class="meta" data-i18n="health.meta">Circuit breaker status for this group. Open circuits are skipped by auto-select / fusion until reset or cooldown ends.</p>
-          <div style="margin-bottom:0.5rem;">
-            <button type="button" id="health-refresh" style="padding:0.35rem 0.75rem;font-size:0.82rem;border:1px solid var(--border);border-radius:5px;background:var(--card);color:var(--text);cursor:pointer;" data-i18n="health.refresh">Refresh</button>
-            <span id="health-status" class="status"></span>
-          </div>
-          <div id="health-list" class="list"></div>
-        </section>
-
-        <section class="section" id="tool-providers">
-          <h2 data-i18n="tools.title">Tool Providers (built-in tool keys)</h2>
-          <p class="meta" data-i18n="tools.meta">Provide keys for built-in tools (e.g. Tavily) exposed to LLMs in this group. When enabled, the router auto-injects tool schemas into OpenAI chat requests.</p>
-          <form id="tool-form" class="form">
-            <div><label data-i18n="label.toolId">Tool ID</label><input name="tool_id" required placeholder="tavily" /></div>
-            <div><label data-i18n="label.name">Name</label><input name="name" required placeholder="Tavily" /></div>
-            <div class="full"><label data-i18n="label.apiKey">API Key</label><input name="api_key" required type="password" placeholder="tvly-..." /></div>
-            <div class="actions">
-              <button type="submit" class="primary" data-i18n="btn.add">Add</button>
-              <span id="tool-status" class="status"></span>
-            </div>
-          </form>
-          <div id="tool-list" class="list"></div>
-        </section>
-
-        <section class="section" id="keys">
-          <h2 data-i18n="keys.title">Self-issued API Keys (db_sk_)</h2>
-          <p class="meta" data-i18n="keys.meta">Keys for clients (Claude Code, Cursor, OpenAI SDK). The model field uses the alias above. Plaintext is shown once; admin can re-retrieve it. Keys are bound to this group.</p>
-          <form id="key-form" class="form">
-            <div><label data-i18n="label.name">Name</label><input name="name" required placeholder="claude-code" /></div>
-            <div><label data-i18n="label.expires">Expires (ISO, empty = never)</label><input name="expires_at" placeholder="2027-01-01T00:00:00" /></div>
-            <div><label data-i18n="keys.maxRequests">Max requests (optional)</label><input name="max_requests" type="number" min="1" placeholder="unlimited" /></div>
-            <div><label data-i18n="keys.maxTokens">Max tokens (optional)</label><input name="max_tokens" type="number" min="1" placeholder="unlimited" /></div>
-            <div><label data-i18n="keys.concurrency">Concurrency limit</label><input name="concurrency_limit" type="number" min="1" placeholder="unlimited" /></div>
-            <div><label data-i18n="keys.rpm">RPM limit</label><input name="rpm_limit" type="number" min="1" placeholder="unlimited" /></div>
-            <div class="actions">
-              <button type="submit" class="primary" data-i18n="btn.createKey">Create Key</button>
-              <span id="key-status" class="status"></span>
-            </div>
-          </form>
-          <div id="key-result" style="display:none; margin-top: 0.5rem; padding: 0.75rem; border: 1px solid #f5c6c6; border-radius: 6px; background: #fff7f7; font-family: 'IBM Plex Mono', monospace; font-size: 0.9rem; word-break: break-all;">
-            <div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.4rem;">
-              <span style="font-size: 0.78rem; color: #b00; font-weight: 500; font-family: 'IBM Plex Sans', sans-serif;" data-i18n="keys.saveNow">Save this now</span>
-              <button type="button" id="key-result-copy" style="margin-left:auto;font-size:0.75rem;padding:2px 8px;border:1px solid #b00;background:#fff;color:#b00;border-radius:4px;cursor:pointer;" data-i18n="keys.copy">Copy</button>
-            </div>
-            <div id="key-plaintext"></div>
-            <div id="key-result-baseurls" style="margin-top:0.6rem;padding-top:0.5rem;border-top:1px dashed #e0c0c0;font-family:'IBM Plex Sans',sans-serif;"></div>
-          </div>
-          <div id="key-list" class="list" style="margin-top: 0.6rem;"></div>
-        </section>
-      </div>
-
-      <section class="section" id="logs" style="margin-top: 1.5rem;">
-        <h2 data-i18n="logs.title">Request Logs</h2>
-        <p class="meta" data-i18n="logs.meta">Recent upstream calls per key (alias / provider / status / latency / tokens). Across all groups.</p>
-        <div style="margin-bottom: 0.6rem; display:flex; gap:0.4rem; align-items:center; flex-wrap: wrap;">
-          <button id="e2e-run" type="button" style="padding: 0.4rem 0.85rem; font-size: 0.85rem; border: 1px solid var(--accent); border-radius: 6px; background: var(--accent); color: var(--bg); cursor: pointer;" data-i18n="logs.e2e">Run E2E Test</button>
-          <span id="e2e-status" class="status"></span>
-          <label style="font-size: 0.78rem; color: var(--muted); margin-left: 0.4rem;" data-i18n="logs.key">Key:</label>
-          <select id="log-key-select" style="padding: 0.4rem 0.6rem; font-size: 0.85rem; border: 1px solid var(--border); border-radius: 6px; background: var(--card); color: var(--text);"></select>
-          <button id="log-refresh" type="button" style="padding: 0.4rem 0.85rem; font-size: 0.85rem; border: 1px solid var(--border); border-radius: 6px; background: var(--card); color: var(--text); cursor: pointer; margin-left: 0.4rem;" data-i18n="logs.refresh">Refresh</button>
         </div>
-        <div id="log-list-wrap">
-          <table class="log-table">
+
+        <!-- routes -->
+        <div id="tab-routes" class="tab-panel" style="display:none;">
+          <div class="card">
+            <div class="card-head">
+              <span class="card-title" data-i18n="route.title">Model Routes</span>
+              <span class="spacer"></span>
+              <button id="route-add-btn" class="btn btn-primary btn-sm" type="button" data-i18n="route.add">+ Add Route</button>
+            </div>
+            <p class="card-meta" data-i18n="route.meta">An alias is the model name your clients send; Keyway forwards it to the upstream model.</p>
+            <form id="route-form" style="display:none;" class="divider-dash">
+              <input type="hidden" id="route-edit-id" />
+              <div class="form-grid">
+                <div class="field"><label data-i18n="route.alias">Alias (client-facing)</label><input class="input mono" name="alias" required placeholder="smart" /></div>
+                <div class="field"><label data-i18n="route.provider">Provider</label><select class="select" name="provider_id" required id="route-provider-select"></select></div>
+                <div class="field"><label data-i18n="route.model">Upstream Model</label><input class="input mono" name="upstream_model" required placeholder="deepseek-chat" /></div>
+                <div class="field">
+                  <label data-i18n="route.mode">Mode</label>
+                  <select class="select" name="mode" id="route-mode">
+                    <option value="direct" selected>direct</option>
+                    <option value="auto-select">auto-select</option>
+                    <option value="adapter">adapter</option>
+                    <option value="fusion">fusion</option>
+                  </select>
+                  <p class="hint" id="route-mode-hint"></p>
+                </div>
+                <div class="field"><label data-i18n="route.enabled">Enabled</label>
+                  <select class="select" name="enabled"><option value="1" data-i18n="common.yes">Yes</option><option value="0" data-i18n="common.no">No</option></select>
+                </div>
+                <div class="field full"><label data-i18n="route.path">Upstream Path (generation endpoints)</label><input class="input mono" name="upstream_path" placeholder="services/aigc/text2image/image-synthesis" /></div>
+                <div class="field full" id="route-adapter-wrap" style="display:none;">
+                  <label data-i18n="adapter.title">Adapter Config</label>
+                  <div class="form-grid" style="margin-top:0.35rem;">
+                    <div class="field"><label data-i18n="adapter.visionAlias">Vision Alias</label><input class="input mono" id="adapter-vision-alias" placeholder="vision-alias" /></div>
+                    <div class="field"><label data-i18n="adapter.fallback">Fallback</label>
+                      <select class="select" id="adapter-fallback">
+                        <option value="error" selected>error</option>
+                        <option value="skip-image">skip-image</option>
+                      </select>
+                    </div>
+                  </div>
+                  <details style="margin-top:0.3rem;">
+                    <summary class="hint" style="cursor:pointer;" data-i18n="adapter.advanced">Advanced JSON</summary>
+                    <textarea class="textarea" id="route-adapter-config" placeholder='{"vision_alias":"vision","fallback":"error"}'></textarea>
+                  </details>
+                </div>
+                <div class="field full" id="route-fusion-wrap" style="display:none;">
+                  <label data-i18n="fusion.title">Fusion Config</label>
+                  <div class="form-grid" style="margin-top:0.35rem;">
+                    <div class="field"><label data-i18n="fusion.judgeAlias">Judge Alias</label><input class="input mono" id="fusion-judge-alias" placeholder="judge" /></div>
+                    <div class="field"><label data-i18n="fusion.strategy">Strategy</label>
+                      <select class="select" id="fusion-strategy">
+                        <option value="compare_and_synthesize" selected>compare_and_synthesize</option>
+                        <option value="majority_vote">majority_vote</option>
+                        <option value="ranked">ranked</option>
+                      </select>
+                    </div>
+                    <div class="field"><label data-i18n="fusion.minCandidates">Min Candidates</label><input class="input" id="fusion-min-candidates" type="number" value="2" min="1" /></div>
+                    <div class="field"><label data-i18n="fusion.timeout">Timeout (seconds)</label><input class="input" id="fusion-timeout" type="number" value="30" min="1" /></div>
+                  </div>
+                  <details style="margin-top:0.3rem;">
+                    <summary class="hint" style="cursor:pointer;" data-i18n="fusion.advanced">Advanced JSON</summary>
+                    <textarea class="textarea" id="route-fusion-config" placeholder='{"judge_alias":"judge","strategy":"compare_and_synthesize","min_candidates":2}'></textarea>
+                  </details>
+                </div>
+                <div class="field full"><label data-i18n="route.note">Note (optional)</label><input class="input" name="note" /></div>
+              </div>
+              <div class="form-actions">
+                <button type="submit" class="btn btn-primary" id="route-submit" data-i18n="route.submit">Add Route</button>
+                <button type="button" class="btn btn-ghost" id="route-cancel" data-i18n="prov.cancel">Cancel</button>
+              </div>
+            </form>
+            <div id="route-list" class="list" style="margin-top:0.5rem;"></div>
+          </div>
+
+          <div class="card" id="route-providers-panel" style="display:none;">
+            <div class="card-head">
+              <span class="card-title"><span data-i18n="rp.title">Route Providers</span> <span id="rp-route-label" class="muted mono" style="font-size:0.8rem;"></span></span>
+              <span class="spacer"></span>
+              <button type="button" id="rp-close" class="btn btn-ghost btn-sm" data-i18n="common.close">Close</button>
+            </div>
+            <p class="card-meta" data-i18n="rp.meta">Candidate providers for auto-select / fusion. Lower priority number = tried first.</p>
+            <form id="rp-form">
+              <input type="hidden" id="rp-route-id" />
+              <div class="form-grid">
+                <div class="field"><label data-i18n="route.provider">Provider</label><select class="select" id="rp-provider-select" required></select></div>
+                <div class="field"><label data-i18n="route.model">Upstream Model</label><input class="input mono" id="rp-upstream-model" required placeholder="model-id" /></div>
+                <div class="field"><label data-i18n="cred.priority">Priority</label><input class="input" id="rp-priority" type="number" value="1" /></div>
+              </div>
+              <div class="form-actions">
+                <button type="submit" class="btn btn-primary" data-i18n="rp.add">Add Provider</button>
+              </div>
+            </form>
+            <div id="rp-list" class="list" style="margin-top:0.6rem;"></div>
+          </div>
+        </div>
+
+        <!-- keys -->
+        <div id="tab-keys" class="tab-panel" style="display:none;">
+          <div class="card">
+            <div class="card-head">
+              <span class="card-title" data-i18n="keys.title">Self-issued API Keys</span>
+              <span class="spacer"></span>
+              <button id="key-add-btn" class="btn btn-primary btn-sm" type="button">+ <span data-i18n="keys.create">Create Key</span></button>
+            </div>
+            <p class="card-meta" data-i18n="keys.meta">Clients (Claude Code, Cursor, SDKs) authenticate with these db_sk_ keys. Keys are bound to this group.</p>
+            <form id="key-form" style="display:none;" class="divider-dash">
+              <div class="form-grid">
+                <div class="field"><label data-i18n="keys.name">Name</label><input class="input" name="name" required placeholder="claude-code" /></div>
+                <div class="field"><label data-i18n="keys.expires">Expires (empty = never)</label><input class="input" name="expires_at" type="datetime-local" /></div>
+                <div class="field"><label><span data-i18n="keys.maxRequests">Max requests</span> <span class="muted">(<span data-i18n="keys.optional">optional</span>)</span></label><input class="input" name="max_requests" type="number" min="1" placeholder="∞" /></div>
+                <div class="field"><label><span data-i18n="keys.maxTokens">Max tokens</span> <span class="muted">(<span data-i18n="keys.optional">optional</span>)</span></label><input class="input" name="max_tokens" type="number" min="1" placeholder="∞" /></div>
+                <div class="field"><label><span data-i18n="keys.concurrency">Concurrency limit</span> <span class="muted">(<span data-i18n="keys.optional">optional</span>)</span></label><input class="input" name="concurrency_limit" type="number" min="1" placeholder="∞" /></div>
+                <div class="field"><label><span data-i18n="keys.rpm">RPM limit</span> <span class="muted">(<span data-i18n="keys.optional">optional</span>)</span></label><input class="input" name="rpm_limit" type="number" min="1" placeholder="∞" /></div>
+              </div>
+              <div class="form-actions">
+                <button type="submit" class="btn btn-primary" data-i18n="keys.create">Create Key</button>
+                <button type="button" class="btn btn-ghost" id="key-cancel" data-i18n="prov.cancel">Cancel</button>
+              </div>
+            </form>
+            <div id="key-result" style="display:none; margin-top:0.7rem; padding:0.8rem 0.9rem; border:1px solid var(--err); border-radius:var(--radius-sm); background:var(--err-soft);">
+              <div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.4rem;">
+                <span style="font-size:0.8rem;color:var(--err);font-weight:600;" data-i18n="keys.saveNow">Save this key now</span>
+                <span style="flex:1;"></span>
+                <button type="button" id="key-result-copy" class="btn btn-danger btn-sm" data-i18n="keys.copy">Copy</button>
+              </div>
+              <div id="key-plaintext" class="mono" style="font-size:0.88rem;word-break:break-all;"></div>
+            </div>
+            <div id="key-list" class="list" style="margin-top:0.6rem;"></div>
+          </div>
+        </div>
+
+        <!-- tools -->
+        <div id="tab-tools" class="tab-panel" style="display:none;">
+          <div class="card">
+            <div class="card-head">
+              <span class="card-title" data-i18n="tools.title">Tool Providers</span>
+              <span class="spacer"></span>
+              <button id="tool-add-btn" class="btn btn-primary btn-sm" type="button">+ <span data-i18n="tools.add">Add</span></button>
+            </div>
+            <p class="card-meta" data-i18n="tools.meta">Keys for built-in tools (e.g. Tavily web search). When enabled, tool schemas are auto-injected into chat requests.</p>
+            <form id="tool-form" style="display:none;" class="divider-dash">
+              <div class="form-grid">
+                <div class="field"><label data-i18n="tools.toolId">Tool ID</label><input class="input mono" name="tool_id" required placeholder="tavily" /></div>
+                <div class="field"><label data-i18n="tools.name">Name</label><input class="input" name="name" required placeholder="Tavily" /></div>
+                <div class="field full"><label data-i18n="tools.apiKey">API Key</label><input class="input mono" name="api_key" required type="password" autocomplete="new-password" placeholder="tvly-..." /></div>
+              </div>
+              <div class="form-actions">
+                <button type="submit" class="btn btn-primary" data-i18n="tools.add">Add</button>
+                <button type="button" class="btn btn-ghost" id="tool-cancel" data-i18n="prov.cancel">Cancel</button>
+              </div>
+            </form>
+            <div id="tool-list" class="list" style="margin-top:0.5rem;"></div>
+          </div>
+        </div>
+
+        <!-- health -->
+        <div id="tab-health" class="tab-panel" style="display:none;">
+          <div class="card">
+            <div class="card-head">
+              <span class="card-title" data-i18n="health.title">Provider Health</span>
+              <span class="spacer"></span>
+              <button type="button" id="health-refresh" class="btn btn-ghost btn-sm" data-i18n="health.refresh">Refresh</button>
+            </div>
+            <p class="card-meta" data-i18n="health.meta">Circuit breakers for this group. Open circuits are skipped until reset or cooldown ends.</p>
+            <div id="health-list" class="list"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ logs ============ -->
+      <section id="view-logs" style="display:none;">
+        <div class="page-head">
+          <h1 data-i18n="logs.title">Request Logs</h1>
+          <span class="spacer"></span>
+          <select id="log-key-select" class="select" style="width:auto;min-width:180px;"></select>
+          <button id="log-refresh" class="btn btn-ghost btn-sm" type="button" data-i18n="logs.refresh">Refresh</button>
+          <button id="e2e-run" class="btn btn-primary btn-sm" type="button" data-i18n="logs.e2e">Run E2E Test</button>
+        </div>
+        <p class="card-meta" data-i18n="logs.meta">Recent upstream calls, newest first. Filter by key or view all.</p>
+        <div id="e2e-results" style="display:none;"></div>
+        <div class="table-wrap">
+          <table class="table">
             <thead><tr>
               <th data-i18n="logs.th.time">Time</th>
-              <th data-i18n="logs.th.alias">alias</th>
-              <th data-i18n="logs.th.provider">provider</th>
-              <th data-i18n="logs.th.upstream">upstream</th>
-              <th data-i18n="logs.th.status">status</th>
-              <th data-i18n="logs.th.latency">latency</th>
-              <th data-i18n="logs.th.tokens">tokens</th>
-              <th data-i18n="logs.th.error">error</th>
+              <th data-i18n="logs.th.alias">Alias</th>
+              <th data-i18n="logs.th.provider">Provider</th>
+              <th data-i18n="logs.th.upstream">Upstream</th>
+              <th data-i18n="logs.th.status">Status</th>
+              <th data-i18n="logs.th.latency">Latency</th>
+              <th data-i18n="logs.th.tokens">Tokens</th>
+              <th data-i18n="logs.th.error">Error</th>
             </tr></thead>
             <tbody id="log-tbody"></tbody>
           </table>
         </div>
-        <div id="e2e-results" style="display:none; margin-top: 1rem;"></div>
       </section>
 
-      <pre id="output" style="margin-top: 1rem; padding: 0.6rem; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; font-size: 0.78rem; max-height: 200px; overflow: auto;"></pre>
-    </div>
-  </main>
+      <!-- ============ settings ============ -->
+      <section id="view-settings" style="display:none;">
+        <div class="page-head"><h1 data-i18n="settings.title">Settings</h1></div>
+        <div class="card" style="max-width:520px;">
+          <p class="card-meta" data-i18n="settings.meta">Preferences for this Keyway admin UI.</p>
+          <form id="settings-form">
+            <div class="field">
+              <label data-i18n="settings.language">Language</label>
+              <select id="settings-language" class="select" name="language">
+                <option value="en">English</option>
+                <option value="zh">中文 (Chinese)</option>
+              </select>
+              <p class="hint" data-i18n="settings.languageHelp">Stored on the server; applies to every browser that opens this UI.</p>
+            </div>
+            <div class="field">
+              <label data-i18n="settings.theme">Theme</label>
+              <select id="settings-theme" class="select">
+                <option value="auto" data-i18n="theme.auto">Auto</option>
+                <option value="light" data-i18n="theme.light">Light</option>
+                <option value="dark" data-i18n="theme.dark">Dark</option>
+              </select>
+              <p class="hint" data-i18n="settings.themeHelp">Auto follows your operating system. Stored in this browser only.</p>
+            </div>
+            <div class="form-actions">
+              <button type="submit" class="btn btn-primary" data-i18n="settings.save">Save settings</button>
+            </div>
+          </form>
+        </div>
+      </section>
+    </main>
+  </div>
 
+  <!-- new group modal -->
   <div class="modal-overlay" id="group-modal">
-    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="group-modal-title">
-      <h2 id="group-modal-title" data-i18n="modal.newGroup">New Routing Group</h2>
+    <div class="modal" role="dialog" aria-modal="true">
+      <h2 data-i18n="modal.newGroup">New Routing Group</h2>
       <p class="modal-sub" data-i18n="modal.sub">A group bundles providers, routes, tool keys and self-issued API keys.</p>
-      <label for="gm-gid" data-i18n="modal.groupId">Group ID (slug)</label>
-      <input id="gm-gid" class="mono" autocomplete="off" placeholder="deepseek-main" />
-      <p class="modal-hint" data-i18n="modal.groupIdHint">Lowercase alphanumeric, - and _. Used as the URL path segment.</p>
-      <label for="gm-name" data-i18n="modal.displayName">Display name</label>
-      <input id="gm-name" autocomplete="off" placeholder="DeepSeek Main" />
+      <div class="field">
+        <label for="gm-gid" data-i18n="modal.groupId">Group ID (slug)</label>
+        <input id="gm-gid" class="input mono" autocomplete="off" placeholder="deepseek-main" />
+        <p class="hint" data-i18n="modal.groupIdHint">Lowercase letters, digits, . _ or - (1–64 chars). Used in URLs.</p>
+      </div>
+      <div class="field">
+        <label for="gm-name" data-i18n="modal.displayName">Display name</label>
+        <input id="gm-name" class="input" autocomplete="off" placeholder="DeepSeek Main" />
+      </div>
       <div class="modal-error" id="gm-error"></div>
       <div class="modal-actions">
-        <button type="button" class="ghost" id="gm-cancel" data-i18n="btn.cancel">Cancel</button>
-        <button type="button" class="primary" id="gm-create" data-i18n="modal.create">Create Group</button>
+        <button type="button" class="btn btn-ghost" id="gm-cancel" data-i18n="common.cancel">Cancel</button>
+        <button type="button" class="btn btn-primary" id="gm-create" data-i18n="modal.create">Create Group</button>
       </div>
     </div>
   </div>
+
+  <!-- confirm modal -->
+  <div class="modal-overlay" id="confirm-modal">
+    <div class="modal" role="dialog" aria-modal="true">
+      <h2 id="confirm-title" data-i18n="confirm.title">Please confirm</h2>
+      <p class="modal-sub" id="confirm-body"></p>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-ghost" id="confirm-cancel" data-i18n="confirm.cancel">Cancel</button>
+        <button type="button" class="btn btn-danger-solid" id="confirm-ok" data-i18n="confirm.ok">Confirm</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- snippet modal -->
+  <div class="modal-overlay" id="snippet-modal">
+    <div class="modal modal-lg" role="dialog" aria-modal="true">
+      <h2 data-i18n="snip.title">Connect a client</h2>
+      <p class="modal-sub" id="snip-sub"></p>
+      <div class="inline-note" id="snip-proto-note"></div>
+      <div class="field">
+        <label data-i18n="snip.key">API key</label>
+        <div style="display:flex;gap:0.5rem;">
+          <select id="snip-key-select" class="select" style="flex:1;"></select>
+          <button id="snip-copy-key" class="btn btn-ghost btn-sm" type="button" data-i18n="keys.copyKey">Copy key</button>
+        </div>
+      </div>
+      <div class="snippet-tabs" id="snip-tabs"></div>
+      <div class="code-block" id="snip-code-wrap">
+        <button class="btn btn-ghost btn-sm copy-btn" id="snip-copy" type="button" data-i18n="snip.copy">Copy</button>
+        <span id="snip-code"></span>
+      </div>
+      <p class="hint" id="snip-hint" style="margin-top:0.6rem;"></p>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-ghost" id="snip-close" data-i18n="common.close">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- key edit modal -->
+  <div class="modal-overlay" id="key-edit-modal">
+    <div class="modal" role="dialog" aria-modal="true">
+      <h2 data-i18n="keyEdit.title">Edit API Key</h2>
+      <p class="modal-sub" data-i18n="keyEdit.sub">Adjust quotas, expiry or status. Empty number fields keep their current values.</p>
+      <input type="hidden" id="ke-key-id" />
+      <div class="field">
+        <label data-i18n="keys.name">Name</label>
+        <input id="ke-name" class="input" />
+      </div>
+      <div class="field">
+        <label data-i18n="keyEdit.enabled">Status</label>
+        <select id="ke-enabled" class="select">
+          <option value="1" data-i18n="common.enabled">Enabled</option>
+          <option value="0" data-i18n="common.disabled">Disabled</option>
+        </select>
+      </div>
+      <div class="field">
+        <label data-i18n="keyEdit.expires">Expires at</label>
+        <input id="ke-expires" class="input" type="datetime-local" />
+        <label class="check-row" style="margin-top:0.35rem;">
+          <input type="checkbox" id="ke-clear-expires" />
+          <span data-i18n="keyEdit.clearExpires">Clear expiry (never expires)</span>
+        </label>
+      </div>
+      <div class="field">
+        <label data-i18n="keys.maxRequests">Max requests</label>
+        <div style="display:flex;gap:0.5rem;align-items:center;">
+          <input id="ke-max-requests" class="input" type="number" min="1" placeholder="∞" style="flex:1;" />
+          <label class="check-row"><input type="checkbox" id="ke-clear-max-requests" /><span data-i18n="keyEdit.unlimited">unlimited</span></label>
+        </div>
+      </div>
+      <div class="field">
+        <label data-i18n="keys.maxTokens">Max tokens</label>
+        <div style="display:flex;gap:0.5rem;align-items:center;">
+          <input id="ke-max-tokens" class="input" type="number" min="1" placeholder="∞" style="flex:1;" />
+          <label class="check-row"><input type="checkbox" id="ke-clear-max-tokens" /><span data-i18n="keyEdit.unlimited">unlimited</span></label>
+        </div>
+      </div>
+      <div class="field">
+        <label data-i18n="keys.concurrency">Concurrency limit</label>
+        <div style="display:flex;gap:0.5rem;align-items:center;">
+          <input id="ke-concurrency" class="input" type="number" min="1" placeholder="∞" style="flex:1;" />
+          <label class="check-row"><input type="checkbox" id="ke-clear-concurrency" /><span data-i18n="keyEdit.unlimited">unlimited</span></label>
+        </div>
+      </div>
+      <div class="field">
+        <label data-i18n="keys.rpm">RPM limit</label>
+        <div style="display:flex;gap:0.5rem;align-items:center;">
+          <input id="ke-rpm" class="input" type="number" min="1" placeholder="∞" style="flex:1;" />
+          <label class="check-row"><input type="checkbox" id="ke-clear-rpm" /><span data-i18n="keyEdit.unlimited">unlimited</span></label>
+        </div>
+      </div>
+      <div class="field">
+        <label class="check-row">
+          <input type="checkbox" id="ke-reset-usage" />
+          <span data-i18n="keyEdit.resetUsage">Reset usage counters</span>
+        </label>
+      </div>
+      <div class="modal-error" id="ke-error"></div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-ghost" id="ke-cancel" data-i18n="common.cancel">Cancel</button>
+        <button type="button" class="btn btn-primary" id="ke-save" data-i18n="common.save">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="toast-wrap" id="toast-wrap"></div>
 
   <script type="module" src="/assets/admin.js"></script>
 </body>

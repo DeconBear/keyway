@@ -6,6 +6,7 @@ provider_health / credential_health + CRUD.
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -15,20 +16,14 @@ from typing import Any
 
 from . import crypto
 
+logger = logging.getLogger(__name__)
+
 
 DEFAULT_GROUP_ID = "default"
 DEFAULT_GROUP_NAME = "Default Group"
 VALID_MODES = ("direct", "auto-select", "adapter", "fusion")
 CIRCUIT_FAIL_THRESHOLD = 3
 CIRCUIT_OPEN_SECONDS = 60
-_KEY_QUOTA_COLS = (
-    "max_requests",
-    "used_requests",
-    "max_tokens",
-    "used_tokens",
-    "concurrency_limit",
-    "rpm_limit",
-)
 
 
 def _utc_now_iso() -> str:
@@ -44,6 +39,8 @@ class LLMStore:
         self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA foreign_keys = ON")
+        self._conn.execute("PRAGMA busy_timeout = 5000")
+        self._conn.execute("PRAGMA journal_mode = WAL")
         self._init_schema()
         self._ensure_default_group()
         self._migrate_provider_credentials()
@@ -54,9 +51,10 @@ class LLMStore:
     # ---- at-rest secret encryption helpers ----
     # Provider/tool api_keys are encrypted with KEYWAY_SECRET (Fernet via
     # crypto.py). When no secret is configured these degrade to plaintext
-    # passthrough. _dec_api_key is tolerant: a value that fails to decrypt
-    # is returned as-is, so databases partway through the
-    # plaintext->ciphertext migration still read.
+    # passthrough. _dec_api_key is tolerant of legacy plaintext values (a
+    # database partway through the plaintext->ciphertext migration still
+    # reads), but a value that looks like Fernet ciphertext yet fails to
+    # decrypt is treated as unusable ("") so it is never sent upstream.
     def _enc_api_key(self, plaintext: str) -> str:
         if not plaintext or crypto.is_dev_fallback(self._secret):
             return plaintext
@@ -68,6 +66,17 @@ class LLMStore:
         try:
             return crypto.decrypt_value(value, self._secret)
         except Exception:
+            # Fernet tokens always start with "gAAAAA". A value that looks
+            # like ciphertext but won't decrypt means the secret changed —
+            # returning it as-is would leak the ciphertext to the upstream
+            # provider as a Bearer token. Treat the credential as unusable.
+            if value.startswith("gAAAAA"):
+                logger.error(
+                    "stored api_key failed to decrypt (KEYWAY_SECRET changed?); "
+                    "credential treated as unusable"
+                )
+                return ""
+            # Plaintext value from before the at-rest encryption migration.
             return value
 
     def _init_schema(self) -> None:
@@ -489,11 +498,13 @@ class LLMStore:
                 self._conn.execute(
                     "INSERT INTO llm_api_keys "
                     "(key_id, group_id, key_hash, key_prefix, name, owner_user_id, "
-                    " enabled, expires_at, last_used_at, created_at, key_encrypted) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)",
+                    " enabled, expires_at, last_used_at, created_at, key_encrypted, "
+                    " max_requests, max_tokens, concurrency_limit, rpm_limit) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?)",
                     (new_key_id, new_group_id, key_hash, key_prefix, k["name"],
                      k["owner_user_id"], k["enabled"], k["expires_at"], now,
-                     key_encrypted),
+                     key_encrypted, k["max_requests"], k["max_tokens"],
+                     k["concurrency_limit"], k["rpm_limit"]),
                 )
                 issued_keys.append({
                     "key_id": new_key_id,
@@ -804,6 +815,15 @@ class LLMStore:
 
     def update_route(self, route_id: str, alias: str | None = None, provider_id: str | None = None,
                     upstream_model: str | None = None, enabled: bool | None = None, note: str | None = None) -> dict[str, Any] | None:
+        if provider_id is not None:
+            route_row = self.get_route(route_id)
+            if not route_row:
+                return None
+            prov = self.get_provider_with_key(provider_id)
+            if not prov:
+                raise ValueError(f"provider not found: {provider_id}")
+            if prov.get("group_id") != route_row.get("group_id"):
+                raise ValueError("provider does not belong to this route's group")
         sets: list[str] = []
         vals: list[Any] = []
         if alias is not None:
@@ -838,6 +858,15 @@ class LLMStore:
             existing = self.get_route(route_id)
             if not existing or existing.get("group_id") != group_id_check:
                 return None
+        if provider_id is not None:
+            route_row = self.get_route(route_id)
+            if not route_row:
+                return None
+            prov = self.get_provider_with_key(provider_id)
+            if not prov:
+                raise ValueError(f"provider not found: {provider_id}")
+            if prov.get("group_id") != route_row.get("group_id"):
+                raise ValueError("provider does not belong to this route's group")
         if mode is not None and mode not in VALID_MODES:
             raise ValueError(f"invalid mode: {mode} (must be one of {', '.join(VALID_MODES)})")
         sets: list[str] = []
@@ -1012,11 +1041,12 @@ class LLMStore:
         )
 
     def bump_key_usage(self, key_id: str, *, requests: int = 1, tokens: int = 0) -> None:
+        """Adjust usage counters; negative deltas refund (counters clamp at 0)."""
         with self._lock, self._conn:
             self._conn.execute(
-                "UPDATE llm_api_keys SET used_requests = COALESCE(used_requests, 0) + ?, "
-                "used_tokens = COALESCE(used_tokens, 0) + ? WHERE key_id = ?",
-                (max(0, int(requests)), max(0, int(tokens)), key_id),
+                "UPDATE llm_api_keys SET used_requests = MAX(0, COALESCE(used_requests, 0) + ?), "
+                "used_tokens = MAX(0, COALESCE(used_tokens, 0) + ?) WHERE key_id = ?",
+                (int(requests), int(tokens), key_id),
             )
 
     def delete_key(self, key_id: str) -> bool:
@@ -1302,16 +1332,6 @@ class LLMStore:
         d["circuit_open"] = self.is_credential_circuit_open(credential_id)
         return d
 
-    def get_credential_with_key(self, credential_id: str) -> dict[str, Any] | None:
-        row = self._conn.execute(
-            "SELECT * FROM provider_credentials WHERE credential_id = ?", (credential_id,)
-        ).fetchone()
-        if not row:
-            return None
-        d = dict(row)
-        d["api_key"] = self._dec_api_key(d.get("api_key", ""))
-        return d
-
     def create_credential(
         self,
         provider_id: str,
@@ -1400,6 +1420,8 @@ class LLMStore:
             if self.is_credential_circuit_open(d["credential_id"]):
                 continue
             d["api_key"] = self._dec_api_key(d.get("api_key", ""))
+            if not d["api_key"]:
+                continue
             out.append(d)
         return out
 
@@ -1410,8 +1432,9 @@ class LLMStore:
             return None
         min_pri = min(int(c.get("priority") or 0) for c in healthy)
         band = [c for c in healthy if int(c.get("priority") or 0) == min_pri]
-        idx = self._rr_cursors.get(provider_id, 0) % len(band)
-        self._rr_cursors[provider_id] = idx + 1
+        with self._lock:
+            idx = self._rr_cursors.get(provider_id, 0) % len(band)
+            self._rr_cursors[provider_id] = idx + 1
         return band[idx]
 
     # ---------- credential_health ----------

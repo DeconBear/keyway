@@ -20,6 +20,12 @@ from paths import DEFAULT_PORT, find_free_port, load_or_create_config
 
 READY_TIMEOUT = 30  # seconds
 
+# Loopback health checks must never go through a system proxy (Windows
+# registry proxies don't bypass-dotted-hosts reliably). build_opener keeps
+# the default HTTP(S) handlers; a bare OpenerDirector would miss them and
+# always fail open().
+_NO_PROXY_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
 
 class ServerManager:
     """Manages the Keyway server lifecycle in a daemon thread."""
@@ -65,11 +71,15 @@ class ServerManager:
 
         cfg = dict(cfg)
         cfg["KEYWAY_HOST"] = self.host
-        cfg["KEYWAY_PORT"] = str(port)
         cfg["KEYWAY_DESKTOP_MODE"] = "1"
         self.config = cfg
 
         for k, v in cfg.items():
+            if k == "KEYWAY_PORT":
+                # The actually-bound port goes to uvicorn directly (below);
+                # writing it back here would persist a drifted port into
+                # config.env on the next start and lose the user's preference.
+                continue
             os.environ[k] = v
         # Ensure public base matches the bound port for admin URL display
         os.environ["KEYWAY_PUBLIC_BASE_URL"] = self.url
@@ -120,7 +130,7 @@ class ServerManager:
         if not self.running:
             return False
         try:
-            with urllib.request.urlopen(f"{self.url}/health", timeout=3) as resp:
+            with _NO_PROXY_OPENER.open(f"{self.url}/health", timeout=3) as resp:
                 return resp.status == 200
         except Exception:
             return False

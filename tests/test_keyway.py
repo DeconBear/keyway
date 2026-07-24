@@ -1938,3 +1938,515 @@ def test_admin_credential_crud(keyway_env: Path) -> None:
         )
         assert patched.status_code == 200
         assert patched.json()["credential"]["enabled"] == 0
+
+
+# ---------- Regression: severe bug fixes ----------
+
+def test_patch_key_preserves_expires_at(keyway_env: Path) -> None:
+    """PATCH without expires_at must not silently clear the existing expiry."""
+    with TestClient(create_app()) as c:
+        r = c.post("/admin/llm/groups/default/keys", json={
+            "name": "exp-key", "expires_at": "2030-01-01T00:00:00+00:00",
+        }, headers=ADMIN_HEADERS)
+        assert r.status_code == 200, r.text
+        key_id = r.json()["key"]["key_id"]
+        assert r.json()["key"]["expires_at"] is not None
+        # PATCH only the name — expires_at must survive.
+        r = c.patch(f"/admin/llm/keys/{key_id}", json={"name": "renamed"}, headers=ADMIN_HEADERS)
+        assert r.status_code == 200, r.text
+        assert r.json()["key"]["expires_at"] is not None
+        # Explicit clear works.
+        r = c.patch(f"/admin/llm/keys/{key_id}", json={"clear_expires_at": True}, headers=ADMIN_HEADERS)
+        assert r.status_code == 200, r.text
+        assert r.json()["key"]["expires_at"] is None
+
+
+def test_tool_loop_does_not_mutate_request_body(keyway_env: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The tool loop must not append assistant/tool messages (or injected
+    tool schemas) into the caller's req_body — fusion candidates and
+    auto-select failover share it across concurrent attempts."""
+    s = LLMStore(keyway_env / "keyway.db", secret=SECRET)
+    s.create_provider("p1", "P1", "https://x/v1", "k")
+    s.create_route("alias-1", "p1", "model-x")
+    s.create_tool_provider("tavily", "Tavily", "tvly-test")
+    r = LLMRouter(s)
+
+    async def fake_call_non_stream(self, provider, model, body):
+        msgs = body.get("messages", [])
+        if any(m.get("role") == "tool" for m in msgs):
+            return {
+                "id": "x", "object": "chat.completion",
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": "done"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            }
+        return {
+            "id": "x", "object": "chat.completion",
+            "choices": [{"index": 0, "message": {
+                "role": "assistant", "content": None,
+                "tool_calls": [{
+                    "id": "call_1", "type": "function",
+                    "function": {"name": "tavily_search", "arguments": json.dumps({"query": "q"})},
+                }],
+            }, "finish_reason": "tool_calls"}],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 4, "total_tokens": 7},
+        }
+    monkeypatch.setattr(LLMRouter, "_call_upstream_non_stream", fake_call_non_stream)
+
+    from keyway import llm_router as llm_router_mod
+    async def fake_execute_tool(name, args, providers):
+        return json.dumps({"results": []})
+    monkeypatch.setattr(llm_router_mod, "execute_tool", fake_execute_tool)
+
+    import asyncio
+    req = {
+        "model": "alias-1",
+        "messages": [{"role": "user", "content": "hi"}],
+        "tools": [{"type": "function", "function": {"name": "my_own_tool", "parameters": {}}}],
+    }
+    out = asyncio.run(r.complete(req))
+    assert out["choices"][0]["message"]["content"] == "done"
+    assert req["messages"] == [{"role": "user", "content": "hi"}], "caller messages must not be polluted"
+    assert len(req["tools"]) == 1, "caller tools must not get builtin schemas appended"
+    s.close()
+
+
+def test_tool_result_flattener_removes_orphan_tool_calls() -> None:
+    """After flattening, no assistant tool_calls / role:tool may remain —
+    upstreams 400 on orphaned tool_calls."""
+    from keyway.adapters import ToolResultFlattener
+    body = {"messages": [
+        {"role": "user", "content": "weather?"},
+        {"role": "assistant", "content": None, "tool_calls": [{
+            "id": "c1", "type": "function",
+            "function": {"name": "get_weather", "arguments": '{"city":"bj"}'},
+        }]},
+        {"role": "tool", "tool_call_id": "c1", "content": "sunny"},
+    ]}
+    out = ToolResultFlattener.adapt(body)
+    msgs = out["messages"]
+    assert all("tool_calls" not in m for m in msgs)
+    assert all(m.get("role") != "tool" for m in msgs)
+    text = json.dumps(msgs, ensure_ascii=False)
+    assert "get_weather" in text and "sunny" in text
+
+
+def test_tool_result_flattener_keeps_multipart_assistant_text() -> None:
+    from keyway.adapters import ToolResultFlattener
+    body = {"messages": [
+        {"role": "assistant", "content": [
+            {"type": "text", "text": "Let me check."},
+        ], "tool_calls": [{
+            "id": "c1", "type": "function",
+            "function": {"name": "lookup", "arguments": "{}"},
+        }]},
+    ]}
+    out = ToolResultFlattener.adapt(body)
+    msg = out["messages"][0]
+    assert "tool_calls" not in msg
+    assert "Let me check." in msg["content"]
+    assert "lookup" in msg["content"]
+
+
+def test_tool_result_flattener_anthropic_tool_use_and_result() -> None:
+    from keyway.adapters import ToolResultFlattener
+    body = {"messages": [
+        {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "t1", "name": "search", "input": {"q": "x"}},
+        ]},
+        {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "t1", "content": "result-text"},
+        ]},
+    ]}
+    out = ToolResultFlattener.adapt(body)
+    block_types = [
+        b.get("type")
+        for m in out["messages"]
+        for b in (m.get("content") if isinstance(m.get("content"), list) else [])
+    ]
+    assert "tool_use" not in block_types and "tool_result" not in block_types
+    text = json.dumps(out["messages"], ensure_ascii=False)
+    assert "search" in text and "result-text" in text
+
+
+def test_circuit_breaker_blocks_direct_mode(keyway_env: Path) -> None:
+    """Direct mode must respect the circuit breaker (previously it only
+    recorded failures but never stopped routing)."""
+    s = LLMStore(keyway_env / "keyway.db", secret=SECRET)
+    s.create_provider("p1", "P1", "https://x/v1", "sk-legacy")
+    s.create_route("alias-1", "p1", "model-x")
+    r = LLMRouter(s)
+    assert r.resolve_route("alias-1") is not None
+    for _ in range(3):
+        s.record_provider_failure("p1")
+    assert s.is_circuit_open("p1")
+    assert r.resolve_route("alias-1") is None
+    assert r._provider_credential_variants({"provider_id": "p1", "api_key": "sk-legacy"}) == []
+    # Recovery: success resets the circuit and routing works again.
+    s.record_provider_success("p1")
+    assert not s.is_circuit_open("p1")
+    assert r.resolve_route("alias-1") is not None
+    s.close()
+
+
+def test_decrypt_failure_never_returns_ciphertext(keyway_env: Path) -> None:
+    """With the wrong KEYWAY_SECRET, stored ciphertext must NOT be handed
+    out as an api_key (it would be sent upstream as a Bearer token)."""
+    s = LLMStore(keyway_env / "keyway.db", secret=SECRET)
+    s.create_provider("p1", "P1", "https://x/v1", "sk-real")
+    s.close()
+    other = LLMStore(keyway_env / "keyway.db", secret="a-different-secret-that-is-wrong!!")
+    p = other.get_provider_with_key("p1")
+    assert p is not None
+    assert p["api_key"] == "", "ciphertext must never leak as a usable key"
+    assert not p["api_key"].startswith("gAAAAA")
+    other.close()
+
+
+def test_quota_gate_atomic_check_and_acquire() -> None:
+    from keyway.key_quota import KeyQuotaError, KeyQuotaGate
+    gate = KeyQuotaGate()
+    key = {"key_id": "k1", "concurrency_limit": 1, "rpm_limit": 2}
+    gate.check_and_acquire(key)
+    with pytest.raises(KeyQuotaError):
+        gate.check_and_acquire(key)  # concurrency slot full
+    gate.release("k1")
+    gate.check_and_acquire(key)  # concurrency free again (RPM: 2/2 after this)
+    gate.release("k1")
+    with pytest.raises(KeyQuotaError):
+        gate.check_and_acquire(key)  # RPM window full
+    # released keys leave no residue in the inflight map
+    assert gate._inflight.get("k1", 0) == 0
+
+
+def test_free_endpoints_bypass_quota_gate(keyway_env: Path) -> None:
+    """Exhausted durable quota must not block /v1/models (no upstream cost),
+    but must still 429 the real completion endpoint."""
+    s = LLMStore(keyway_env / "keyway.db", secret=SECRET)
+    plaintext = generate_key()
+    kid = s.create_key(hash_key(plaintext), key_prefix(plaintext), "k1", max_requests=1)["key_id"]
+    s.bump_key_usage(kid, requests=1, tokens=0)
+    s.close()
+    headers = {"Authorization": f"Bearer {plaintext}"}
+    with TestClient(create_app()) as c:
+        r = c.get("/v1/models", headers=headers)
+        assert r.status_code == 200, r.text
+        r = c.post("/v1/chat/completions", headers=headers,
+                   json={"model": "whatever", "messages": []})
+        assert r.status_code == 429, r.text
+
+
+# ---------- Regression: medium fixes ----------
+
+def test_copy_group_preserves_key_quotas(keyway_env: Path) -> None:
+    s = LLMStore(keyway_env / "keyway.db", secret=SECRET)
+    k = generate_key()
+    s.create_key_in_group(
+        "default", hash_key(k), key_prefix(k), "quota-key",
+        max_requests=100, max_tokens=5000, concurrency_limit=2, rpm_limit=60,
+    )
+    s.copy_group(
+        "default", "g2", "G2",
+        plaintext_for_key=generate_key,
+        hash_for_key=hash_key,
+        encrypt_for_key=lambda p: "enc:" + p,
+        key_prefix_for_key=key_prefix,
+    )
+    new_keys = s.list_keys_in_group("g2")
+    assert len(new_keys) == 1
+    nk = new_keys[0]
+    assert nk["max_requests"] == 100
+    assert nk["max_tokens"] == 5000
+    assert nk["concurrency_limit"] == 2
+    assert nk["rpm_limit"] == 60
+    s.close()
+
+
+def test_fusion_rejects_streaming(keyway_env: Path) -> None:
+    s = LLMStore(keyway_env / "keyway.db", secret=SECRET)
+    s.create_provider_in_group("default", "p1", "P1", "https://x/v1", "k")
+    s.create_provider_in_group("default", "p2", "P2", "https://y/v1", "k")
+    import json as _json
+    r = s.create_route_in_group(
+        "default", "fusion-alias", "p1", "m1", mode="fusion",
+        fusion_config=_json.dumps({"judge_alias": "judge"}),
+    )
+    s.add_route_provider(r["route_id"], "p1", "m1", priority=0)
+    s.add_route_provider(r["route_id"], "p2", "m2", priority=1)
+    plaintext = generate_key()
+    s.create_key_in_group("default", hash_key(plaintext), key_prefix(plaintext), "test")
+    s.close()
+    with TestClient(create_app()) as c:
+        r = c.post(
+            "/v1/chat/completions",
+            headers={"Authorization": f"Bearer {plaintext}"},
+            json={"model": "fusion-alias", "stream": True,
+                  "messages": [{"role": "user", "content": "hi"}]},
+        )
+        assert r.status_code == 400, r.text
+        assert "streaming" in r.text
+
+
+def test_fusion_judge_timeout_and_status_passthrough(keyway_env: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import asyncio
+    from keyway.fusion import FusionOrchestrator
+
+    s = LLMStore(keyway_env / "keyway.db", secret=SECRET)
+    s.create_provider_in_group("default", "pj", "Judge", "https://j/v1", "kj")
+    s.create_route_in_group("default", "judge", "pj", "judge-model")
+    router = LLMRouter(s)
+    orch = FusionOrchestrator(router)
+
+    async def slow_complete(self, req_body, **kwargs):
+        await asyncio.sleep(5)
+        return {}
+    monkeypatch.setattr(LLMRouter, "complete", slow_complete)
+    prompt = {"model": "", "messages": [{"role": "user", "content": "judge this"}]}
+    try:
+        asyncio.run(orch._call_judge(prompt, "judge", "default", None, "fid", "openai", 0.05))
+        raise AssertionError("expected timeout")
+    except UpstreamError as exc:
+        assert exc.status_code == 504
+
+    async def failing_complete(self, req_body, **kwargs):
+        raise UpstreamError("upstream 401: bad key", status_code=401)
+    monkeypatch.setattr(LLMRouter, "complete", failing_complete)
+    try:
+        asyncio.run(orch._call_judge(prompt, "judge", "default", None, "fid", "openai", 5))
+        raise AssertionError("expected UpstreamError")
+    except UpstreamError as exc:
+        assert exc.status_code == 401, "original status_code must be preserved"
+    s.close()
+
+
+def test_http_fetch_bad_max_chars_returns_error_json() -> None:
+    import asyncio
+    from keyway.llm_tools import _handle_http_fetch
+    out = asyncio.run(_handle_http_fetch({"url": "https://example.com", "max_chars": "abc"}, {}))
+    assert "error" in json.loads(out)
+
+
+def test_tool_loop_tool_error_fed_back_to_model(keyway_env: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failing tool must not fail the whole request — the error is fed
+    back as the tool result so the model can recover."""
+    s = LLMStore(keyway_env / "keyway.db", secret=SECRET)
+    s.create_provider("p1", "P1", "https://x/v1", "k")
+    s.create_route("alias-1", "p1", "model-x")
+    s.create_tool_provider("tavily", "Tavily", "tvly-test")
+    r = LLMRouter(s)
+
+    captured: dict[str, Any] = {}
+
+    async def fake_call_non_stream(self, provider, model, body):
+        msgs = body.get("messages", [])
+        if any(m.get("role") == "tool" for m in msgs):
+            captured["tool_msgs"] = [m for m in msgs if m.get("role") == "tool"]
+            return {
+                "id": "x", "object": "chat.completion",
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": "recovered"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            }
+        return {
+            "id": "x", "object": "chat.completion",
+            "choices": [{"index": 0, "message": {
+                "role": "assistant", "content": None,
+                "tool_calls": [{
+                    "id": "call_1", "type": "function",
+                    "function": {"name": "tavily_search", "arguments": "{}"},
+                }],
+            }, "finish_reason": "tool_calls"}],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 4, "total_tokens": 7},
+        }
+    monkeypatch.setattr(LLMRouter, "_call_upstream_non_stream", fake_call_non_stream)
+
+    from keyway import llm_router as llm_router_mod
+    async def failing_execute_tool(name, args, providers):
+        raise RuntimeError("tavily is down")
+    monkeypatch.setattr(llm_router_mod, "execute_tool", failing_execute_tool)
+
+    import asyncio
+    out = asyncio.run(r.complete({"model": "alias-1", "messages": [{"role": "user", "content": "hi"}]}))
+    assert out["choices"][0]["message"]["content"] == "recovered"
+    assert captured["tool_msgs"], "tool result must be fed back"
+    assert "error" in captured["tool_msgs"][0]["content"]
+    s.close()
+
+
+def test_expires_at_validation_and_normalization(keyway_env: Path) -> None:
+    with TestClient(create_app()) as c:
+        # invalid format -> 400
+        r = c.post("/admin/llm/groups/default/keys", json={
+            "name": "bad", "expires_at": "not-a-date",
+        }, headers=ADMIN_HEADERS)
+        assert r.status_code == 400, r.text
+        # timezone offset -> normalized to UTC
+        r = c.post("/admin/llm/groups/default/keys", json={
+            "name": "tz", "expires_at": "2030-01-01T08:00:00+08:00",
+        }, headers=ADMIN_HEADERS)
+        assert r.status_code == 200, r.text
+        assert r.json()["key"]["expires_at"] == "2030-01-01T00:00:00+00:00"
+        # expired key -> 401 on use
+        r = c.post("/admin/llm/groups/default/keys", json={
+            "name": "old", "expires_at": "2020-01-01T00:00:00+00:00",
+        }, headers=ADMIN_HEADERS)
+        plaintext = r.json()["plaintext"]
+        r = c.get("/v1/models", headers={"Authorization": f"Bearer {plaintext}"})
+        assert r.status_code == 401, r.text
+
+
+def test_update_route_rejects_cross_group_provider(keyway_env: Path) -> None:
+    with TestClient(create_app()) as c:
+        c.post("/admin/llm/groups", json={"group_id": "g2", "name": "G2"}, headers=ADMIN_HEADERS)
+        c.post("/admin/llm/groups/default/providers", json={
+            "provider_id": "p1", "name": "P1", "base_url": "https://x/v1", "api_key": "k",
+        }, headers=ADMIN_HEADERS)
+        c.post("/admin/llm/groups/g2/providers", json={
+            "provider_id": "p2", "name": "P2", "base_url": "https://y/v1", "api_key": "k",
+        }, headers=ADMIN_HEADERS)
+        r = c.post("/admin/llm/groups/default/routes", json={
+            "alias": "a1", "provider_id": "p1", "upstream_model": "m",
+        }, headers=ADMIN_HEADERS)
+        route_id = r.json()["route"]["route_id"]
+        r = c.patch(f"/admin/llm/routes/{route_id}", json={"provider_id": "p2"}, headers=ADMIN_HEADERS)
+        assert r.status_code == 400, r.text
+        # same-group provider still works
+        c.post("/admin/llm/groups/default/providers", json={
+            "provider_id": "p3", "name": "P3", "base_url": "https://z/v1", "api_key": "k",
+        }, headers=ADMIN_HEADERS)
+        r = c.patch(f"/admin/llm/routes/{route_id}", json={"provider_id": "p3"}, headers=ADMIN_HEADERS)
+        assert r.status_code == 200, r.text
+
+
+def test_forward_to_path_credential_failover(keyway_env: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    s = LLMStore(keyway_env / "keyway.db", secret=SECRET)
+    s.create_provider_in_group("default", "p1", "P1", "https://x/v1", "sk-primary")
+    s.create_route_in_group("default", "gen", "p1", "m1", upstream_path="services/aigc/text2image")
+    s.create_credential("p1", "sk-bad", priority=0)
+    s.create_credential("p1", "sk-good", priority=1)
+    r = LLMRouter(s)
+
+    calls: list[str] = []
+
+    class _Resp:
+        def __init__(self, status: int) -> None:
+            self.status_code = status
+            self.text = "boom" if status >= 400 else '{"ok": true}'
+        def json(self):
+            return {"ok": True}
+
+    class _Client:
+        def __init__(self, *a, **k): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def post(self, url, json=None, headers=None):
+            auth = (headers or {}).get("Authorization", "")
+            calls.append(auth)
+            return _Resp(200 if auth == "Bearer sk-good" else 500)
+
+    monkeypatch.setattr(httpx, "AsyncClient", _Client)
+    import asyncio
+    resolved = r.resolve_route("gen", group_id="default")
+    out = asyncio.run(r.forward_to_path({"model": "gen", "input": {}}, resolved))
+    assert out["ok"] is True
+    assert "Bearer sk-good" in calls
+    assert len(calls) >= 2, "must fail over across credentials"
+    s.close()
+
+
+def test_failed_request_quota_refunded(keyway_env: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    s = LLMStore(keyway_env / "keyway.db", secret=SECRET)
+    s.create_provider_in_group("default", "p1", "P1", "https://x/v1", "k")
+    s.create_route_in_group("default", "alias-1", "p1", "m1")
+    plaintext = generate_key()
+    kid = s.create_key_in_group("default", hash_key(plaintext), key_prefix(plaintext), "k1")["key_id"]
+    s.close()
+
+    async def failing_complete(self, body, api_key_id=None, protocol=None, resolved=None, **kw):
+        raise UpstreamError("upstream 500: boom", status_code=500)
+    monkeypatch.setattr(LLMRouter, "complete", failing_complete)
+
+    with TestClient(create_app()) as c:
+        r = c.post(
+            "/v1/chat/completions",
+            headers={"Authorization": f"Bearer {plaintext}"},
+            json={"model": "alias-1", "messages": [{"role": "user", "content": "hi"}]},
+        )
+        assert r.status_code == 502, r.text
+    s2 = LLMStore(keyway_env / "keyway.db", secret=SECRET)
+    key_row = s2.get_key(kid)
+    assert key_row["used_requests"] == 0, "failed request must be refunded"
+    assert key_row["used_tokens"] == 0
+    s2.close()
+
+
+def test_generations_endpoint_bills_quota(keyway_env: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    s = LLMStore(keyway_env / "keyway.db", secret=SECRET)
+    s.create_provider_in_group("default", "p1", "P1", "https://x/v1", "k")
+    s.create_route_in_group("default", "gen", "p1", "m1", upstream_path="services/aigc/text2image")
+    plaintext = generate_key()
+    kid = s.create_key_in_group("default", hash_key(plaintext), key_prefix(plaintext), "k1")["key_id"]
+    s.close()
+
+    async def fake_forward(self, body, resolved, api_key_id=None, extra_headers=None):
+        return {"output": {"task_id": "t-1"}}
+    monkeypatch.setattr(LLMRouter, "forward_to_path", fake_forward)
+
+    with TestClient(create_app()) as c:
+        r = c.post(
+            "/v1/generations",
+            headers={"Authorization": f"Bearer {plaintext}"},
+            json={"model": "gen", "input": {"prompt": "cat"}},
+        )
+        assert r.status_code == 200, r.text
+    s2 = LLMStore(keyway_env / "keyway.db", secret=SECRET)
+    assert s2.get_key(kid)["used_requests"] == 1, "generations must consume request quota"
+    s2.close()
+
+
+def test_stream_records_real_usage(keyway_env: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    s = LLMStore(keyway_env / "keyway.db", secret=SECRET)
+    s.create_provider("p1", "P1", "https://x/v1", "k")
+    s.create_route("alias-1", "p1", "model-x")
+    r = LLMRouter(s)
+
+    async def fake_call_stream(self, provider, model, body):
+        yield b'data: {"choices":[{"delta":{"content":"hello"}}]}\n\n'
+        yield b'data: {"choices":[],"usage":{"prompt_tokens":11,"completion_tokens":7}}\n\n'
+        yield b"data: [DONE]\n\n"
+    monkeypatch.setattr(LLMRouter, "_call_upstream_stream", fake_call_stream)
+
+    import asyncio
+    async def collect():
+        chunks = []
+        async for c in r.stream({"model": "alias-1", "messages": [], "stream": True}):
+            chunks.append(c)
+        return chunks
+    asyncio.run(collect())
+    logs = s.list_logs()
+    assert len(logs) == 1
+    assert logs[0]["request_tokens"] == 11
+    assert logs[0]["response_tokens"] == 7
+    s.close()
+
+
+def test_anthropic_stream_error_frame_format(keyway_env: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    s = LLMStore(keyway_env / "keyway.db", secret=SECRET)
+    s.create_provider_in_group("default", "p1", "P1", "https://x", "k", protocol="anthropic")
+    s.create_route_in_group("default", "claude", "p1", "claude-3")
+    r = LLMRouter(s)
+
+    async def fake_anthropic_stream(self, provider, body):
+        raise UpstreamError("upstream 500: boom", status_code=500)
+        yield  # pragma: no cover - make it an async generator
+    monkeypatch.setattr(LLMRouter, "_call_upstream_anthropic_stream", fake_anthropic_stream)
+
+    import asyncio
+    async def collect():
+        chunks = []
+        async for c in r.stream({"model": "claude", "messages": [], "stream": True}, protocol="anthropic"):
+            chunks.append(c)
+        return b"".join(chunks)
+    out = asyncio.run(collect())
+    assert b"event: error" in out
+    assert b'"type": "error"' in out
+    assert b"[DONE]" not in out, "Anthropic streams must not use OpenAI [DONE]"
+    s.close()

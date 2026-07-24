@@ -23,9 +23,11 @@ All settings are via environment variables (or `.env` file):
 
 Open `http://localhost:9233/` in your browser. Log in with your `KEYWAY_ADMIN_TOKEN`.
 
+On a fresh install the **Dashboard** shows a four-step setup guide that walks you through steps 2–5 below and disappears once everything is in place.
+
 ## Step 2: Add an upstream provider
 
-In the "default" group, scroll to "Upstream Providers", fill in:
+Go to **Groups → default → Open**, on the **Providers** tab click **+ Add Provider**, fill in:
 - **ID**: e.g. `deepseek`
 - **Name**: e.g. `DeepSeek`
 - **Protocol**: `openai` or `anthropic`
@@ -34,16 +36,18 @@ In the "default" group, scroll to "Upstream Providers", fill in:
 
 ## Step 3: Create a model route
 
-Scroll to "Model Routes", fill in:
+Switch to the **Routes** tab, click **+ Add Route**, fill in:
 - **Alias**: the name clients will use, e.g. `deepseek-v4-pro`
 - **Provider**: select the provider you just created
 - **Upstream Model**: the real model name at the provider, e.g. `deepseek-chat`
 
 ## Step 4: Create an API key
 
-Scroll to "Self-issued API Keys", create a key. The plaintext `db_sk_...` is shown once — save it. You can re-retrieve it later from the key list.
+Switch to the **API Keys** tab, click **+ Create Key**. The plaintext `db_sk_...` is shown once — save it. You can re-retrieve it later from the key list.
 
 ## Step 5: Connect your client
+
+Fastest path: click **Connect** on any route or key. It opens ready-made snippets (Claude Code, OpenAI SDK, Anthropic SDK, curl — matched to the route's protocol) with the base URL, your key and the alias already filled in. Or copy manually:
 
 ### Claude Code
 

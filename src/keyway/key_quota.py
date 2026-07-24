@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
-from collections import defaultdict, deque
+from collections import deque
 from typing import Any
 
 
@@ -20,10 +20,14 @@ class KeyQuotaGate:
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._inflight: dict[str, int] = defaultdict(int)
-        self._rpm: dict[str, deque[float]] = defaultdict(deque)
+        self._inflight: dict[str, int] = {}
+        self._rpm: dict[str, deque[float]] = {}
 
-    def check(self, key_row: dict[str, Any]) -> None:
+    def check_and_acquire(self, key_row: dict[str, Any]) -> None:
+        """Check durable quotas + concurrency/RPM limits and reserve the
+        slots in a single lock hold (no TOCTOU gap between check and
+        acquire). The caller must call :meth:`release` when done.
+        """
         key_id = key_row.get("key_id") or ""
         max_req = key_row.get("max_requests")
         used_req = int(key_row.get("used_requests") or 0)
@@ -39,27 +43,30 @@ class KeyQuotaGate:
         rpm = key_row.get("rpm_limit")
         now = time.monotonic()
         with self._lock:
-            if conc is not None and self._inflight[key_id] >= int(conc):
+            if conc is not None and self._inflight.get(key_id, 0) >= int(conc):
                 raise KeyQuotaError(
                     f"API key concurrency limit exceeded ({conc})",
                 )
-            if rpm is not None:
-                window = self._rpm[key_id]
+            window = self._rpm.get(key_id)
+            if window is not None:
                 while window and now - window[0] >= 60.0:
                     window.popleft()
-                if len(window) >= int(rpm):
-                    raise KeyQuotaError(f"API key RPM limit exceeded ({rpm}/min)")
-
-    def acquire(self, key_row: dict[str, Any]) -> None:
-        """Reserve concurrency + RPM slots after check() passed."""
-        key_id = key_row.get("key_id") or ""
-        now = time.monotonic()
-        with self._lock:
-            self._inflight[key_id] += 1
-            if key_row.get("rpm_limit") is not None:
-                self._rpm[key_id].append(now)
+                if not window:
+                    del self._rpm[key_id]
+                    window = None
+            if rpm is not None and window is not None and len(window) >= int(rpm):
+                raise KeyQuotaError(f"API key RPM limit exceeded ({rpm}/min)")
+            self._inflight[key_id] = self._inflight.get(key_id, 0) + 1
+            if rpm is not None:
+                if window is None:
+                    window = deque()
+                    self._rpm[key_id] = window
+                window.append(now)
 
     def release(self, key_id: str) -> None:
         with self._lock:
-            if self._inflight[key_id] > 0:
-                self._inflight[key_id] -= 1
+            n = self._inflight.get(key_id, 0)
+            if n <= 1:
+                self._inflight.pop(key_id, None)
+            else:
+                self._inflight[key_id] = n - 1

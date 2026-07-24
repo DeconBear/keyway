@@ -25,10 +25,12 @@ Endpoints:
 from __future__ import annotations
 
 import json
+import hmac
 import logging
 import os
 import secrets
 import sqlite3
+import sys
 import time
 import uuid
 from datetime import datetime, timezone
@@ -52,7 +54,7 @@ from fastapi.staticfiles import StaticFiles
 from . import crypto
 from .config import Settings, load_settings
 from .llm_keys import generate_key as _llm_generate_key, hash_key as _llm_hash_key, key_prefix as _llm_key_prefix
-from .llm_router import LLMRouter, UpstreamError
+from .llm_router import LLMRouter, UpstreamError, estimate_tokens as _llm_estimate_tokens
 from .llm_store import LLMStore
 from .adapters import AdapterPipeline
 from .modality import ModalityDetector
@@ -88,6 +90,34 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _normalize_expires_at(value: str) -> str:
+    """Validate an expiry timestamp and normalize it to UTC ISO-8601.
+    Naive values are treated as UTC."""
+    try:
+        dt = datetime.fromisoformat(value.strip())
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"invalid expires_at {value!r}: expected ISO-8601, e.g. 2030-01-01T00:00:00+00:00",
+        ) from None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).isoformat()
+
+
+def _is_expired(expires_at: str) -> bool:
+    """Parse-based expiry check. Legacy unparseable values are tolerated
+    (ignored rather than locking the key out) but logged."""
+    try:
+        dt = datetime.fromisoformat(expires_at.strip())
+    except ValueError:
+        logger.warning("ignoring unparseable expires_at value: %r", expires_at)
+        return False
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt <= datetime.now(timezone.utc)
+
+
 # ---- session store (in-memory, single-admin, TTL-aware) ----
 class _SessionStore:
     def __init__(self, ttl_seconds: int = SESSION_TTL_SECONDS) -> None:
@@ -101,7 +131,7 @@ class _SessionStore:
         return self._token
 
     def valid(self, token: str) -> bool:
-        if not self._token or token != self._token:
+        if not self._token or not hmac.compare_digest(token, self._token):
             return False
         if time.time() > self._expires_at:
             self.destroy()
@@ -154,12 +184,15 @@ def create_app() -> FastAPI:
     admin_token = settings.admin_token
     if not admin_token:
         admin_token = secrets.token_urlsafe(24)
-        logger.warning(
-            "KEYWAY_ADMIN_TOKEN not set — generated a random admin token for this session:\n"
-            "  %s\n"
-            "Set KEYWAY_ADMIN_TOKEN in .env for a persistent token.",
-            admin_token,
+        # Show the token on the console exactly once (stderr, not the logger)
+        # so it never ends up in log files / log aggregators.
+        print(
+            "\nKEYWAY_ADMIN_TOKEN not set — generated a random admin token for this session:\n"
+            f"  {admin_token}\n"
+            "Set KEYWAY_ADMIN_TOKEN in .env for a persistent token.\n",
+            file=sys.stderr,
         )
+        logger.warning("KEYWAY_ADMIN_TOKEN not set — a random admin token was generated (shown on console)")
 
     # ---- stores ----
     llm_store = LLMStore(settings.data_dir / "keyway.db", secret=settings.secret)
@@ -167,7 +200,7 @@ def create_app() -> FastAPI:
     key_quota = KeyQuotaGate()
     sessions = _SessionStore()
 
-    app = FastAPI(title="Keyway", version="0.1.4", docs_url=None, redoc_url=None, openapi_url=None)
+    app = FastAPI(title="Keyway", version="0.2.0", docs_url=None, redoc_url=None, openapi_url=None)
 
     app.add_middleware(
         CORSMiddleware,
@@ -186,6 +219,38 @@ def create_app() -> FastAPI:
     app.state.logger = logger
     app.state.desktop_mode = desktop_mode
 
+    def _refund_billed_usage(request: Request) -> None:
+        """Undo the pre-deducted quota when the request ends in an error.
+
+        Endpoints stash (key_id, est_tokens) on request.state.keyway_billed
+        right after pre-deducting; any HTTPException/unhandled error then
+        triggers a refund so failed requests don't burn quota.
+        """
+        billed = getattr(request.state, "keyway_billed", None)
+        if not billed:
+            return
+        request.state.keyway_billed = None
+        key_id, est_tokens = billed
+        try:
+            llm_store.bump_key_usage(key_id, requests=-1, tokens=-int(est_tokens))
+        except Exception:
+            logger.exception("failed to refund key usage for %s", key_id)
+
+    @app.exception_handler(HTTPException)
+    async def _http_exception_refund_handler(request: Request, exc: HTTPException) -> JSONResponse:
+        _refund_billed_usage(request)
+        return JSONResponse(
+            {"detail": exc.detail},
+            status_code=exc.status_code,
+            headers=getattr(exc, "headers", None),
+        )
+
+    @app.exception_handler(Exception)
+    async def _unhandled_exception_refund_handler(request: Request, exc: Exception) -> JSONResponse:
+        _refund_billed_usage(request)
+        logger.error("unhandled error on %s: %s", request.url.path, exc)
+        return JSONResponse({"detail": "internal server error"}, status_code=500)
+
     # ==================== Auth helpers ====================
 
     def _require_admin(
@@ -199,7 +264,7 @@ def create_app() -> FastAPI:
         ):
             return {"ok": True}
         token = x_admin_token or request.cookies.get("keyway_admin_session", "")
-        if token and token == request.app.state.admin_token:
+        if token and hmac.compare_digest(token, request.app.state.admin_token):
             return {"ok": True}
         if token and request.app.state.sessions.valid(token):
             return {"ok": True}
@@ -229,15 +294,16 @@ def create_app() -> FastAPI:
         key_row = request.app.state.llm_store.get_key_by_hash(_llm_hash_key(token))
         if not key_row or not key_row.get("enabled"):
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or disabled API key.")
-        if key_row.get("expires_at") and key_row["expires_at"] < _utc_now_iso():
+        if key_row.get("expires_at") and _is_expired(key_row["expires_at"]):
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="API key expired.")
         gate: KeyQuotaGate = request.app.state.key_quota
         path = request.url.path
+        # /v1/models and /v1/messages/count_tokens consume no upstream
+        # resources — they bypass the quota gate entirely.
         need_slot = path not in ("/v1/models", "/v1/messages/count_tokens")
         try:
-            gate.check(key_row)
             if need_slot:
-                gate.acquire(key_row)
+                gate.check_and_acquire(key_row)
         except KeyQuotaError as exc:
             raise HTTPException(status_code=exc.status_code, detail=exc.message)
         request.app.state.llm_store.touch_key_used(key_row["key_id"])
@@ -255,23 +321,13 @@ def create_app() -> FastAPI:
 
     def _estimate_tokens(req: dict) -> int:
         """Rough char/4 heuristic."""
-        chars = 0
-        for m in req.get("messages") or []:
-            content = m.get("content")
-            if isinstance(content, str):
-                chars += len(content)
-            elif isinstance(content, list):
-                for block in content:
-                    if isinstance(block, dict):
-                        chars += len(str(block.get("text", "")))
-        chars += len(req.get("system", "") if isinstance(req.get("system"), str) else "")
-        return max(1, chars // 4 + 4)
+        return _llm_estimate_tokens(req)
 
     # ==================== Admin: login / session ====================
 
     @app.post("/admin/login")
     def admin_login(payload: AdminLoginRequest, request: Request, response: Response) -> dict:
-        if payload.token != request.app.state.admin_token:
+        if not hmac.compare_digest(payload.token, request.app.state.admin_token):
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid admin token.")
         session_token = request.app.state.sessions.create()
         response.set_cookie(
@@ -291,7 +347,7 @@ def create_app() -> FastAPI:
     ) -> Response:
         """Desktop auto-login: validate token, set session cookie, redirect to admin.html."""
         from fastapi.responses import RedirectResponse
-        if token != request.app.state.admin_token:
+        if not hmac.compare_digest(token, request.app.state.admin_token):
             return RedirectResponse("/")
         session_token = request.app.state.sessions.create()
         response = RedirectResponse("/admin.html")
@@ -741,7 +797,8 @@ def create_app() -> FastAPI:
             key_row = llm_store.create_key_in_group(
                 group_id=group_id, key_hash=_llm_hash_key(plaintext),
                 key_prefix=_llm_key_prefix(plaintext), name=payload.name,
-                owner_user_id=payload.owner_user_id, expires_at=payload.expires_at,
+                owner_user_id=payload.owner_user_id,
+                expires_at=_normalize_expires_at(payload.expires_at) if payload.expires_at else None,
                 key_encrypted=_llm_encrypt(plaintext),
                 max_requests=payload.max_requests,
                 max_tokens=payload.max_tokens,
@@ -800,8 +857,13 @@ def create_app() -> FastAPI:
             rpm_limit = None
         elif payload.rpm_limit is not None:
             rpm_limit = payload.rpm_limit
+        expires_at: Any = "__UNSET__"
+        if payload.clear_expires_at:
+            expires_at = None
+        elif payload.expires_at is not None:
+            expires_at = _normalize_expires_at(payload.expires_at)
         k = llm_store.update_key_in_group(
-            key_id=key_id, name=payload.name, enabled=payload.enabled, expires_at=payload.expires_at,
+            key_id=key_id, name=payload.name, enabled=payload.enabled, expires_at=expires_at,
             max_requests=max_requests, max_tokens=max_tokens,
             concurrency_limit=concurrency_limit, rpm_limit=rpm_limit,
             reset_usage=payload.reset_usage,
@@ -885,10 +947,16 @@ def create_app() -> FastAPI:
                 raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"provider not found: {payload.provider_id}")
             test = await router.probe(prov)
         elif payload.alias:
-            route = llm_store.get_route_by_alias(payload.alias)
+            if payload.group_id:
+                route = llm_store.get_route_by_alias_in_group(payload.alias, group_id=payload.group_id)
+            else:
+                route = llm_store.get_route_by_alias(payload.alias)
             if not route:
                 raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"route not found: {payload.alias}")
-            prov = llm_store.get_provider_with_key(route["provider_id"])
+            if payload.group_id:
+                prov = llm_store.get_provider_with_key_in_group(route["provider_id"], payload.group_id)
+            else:
+                prov = llm_store.get_provider_with_key(route["provider_id"])
             if not prov:
                 raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"provider not found for route: {payload.alias}")
             test = await router.probe(prov, route["upstream_model"])
@@ -957,7 +1025,9 @@ def create_app() -> FastAPI:
             msg = f"model '{alias}' not found in group '{group_id}'"
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=msg)
 
-        _bump_key_usage(key, tokens=_estimate_tokens(body))
+        est_tokens = _estimate_tokens(body)
+        _bump_key_usage(key, tokens=est_tokens)
+        request.state.keyway_billed = (key["key_id"], est_tokens)
         mode = route.get("mode") or "direct"
 
         if mode == "auto-select":
@@ -1025,6 +1095,11 @@ def create_app() -> FastAPI:
             return JSONResponse(result)
 
         if mode == "fusion":
+            if body.get("stream"):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="fusion mode does not support streaming",
+                )
             import json as _json
             try:
                 fusion_cfg = _json.loads(route.get("fusion_config") or "{}")
@@ -1037,8 +1112,14 @@ def create_app() -> FastAPI:
                     detail="fusion mode requires 'judge_alias' in fusion_config",
                 )
             strategy = fusion_cfg.get("strategy", "compare_and_synthesize")
-            min_candidates = int(fusion_cfg.get("min_candidates", 2))
-            timeout_seconds = int(fusion_cfg.get("timeout_seconds", 30))
+            try:
+                min_candidates = max(1, int(fusion_cfg.get("min_candidates", 2)))
+                timeout_seconds = max(1, int(fusion_cfg.get("timeout_seconds", 30)))
+            except (TypeError, ValueError):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="invalid 'min_candidates'/'timeout_seconds' in fusion_config",
+                )
 
             candidates = router.resolve_route_auto(alias, group_id=group_id, required_protocol="openai")
             if len(candidates) < min_candidates:
@@ -1134,7 +1215,9 @@ def create_app() -> FastAPI:
                 detail={"type": "not_found_error", "message": msg},
             )
 
-        _bump_key_usage(key, tokens=_estimate_tokens(req))
+        est_tokens = _estimate_tokens(req)
+        _bump_key_usage(key, tokens=est_tokens)
+        request.state.keyway_billed = (key["key_id"], est_tokens)
         mode = route.get("mode") or "direct"
 
         if mode == "auto-select":
@@ -1233,6 +1316,14 @@ def create_app() -> FastAPI:
             return JSONResponse(anthropic_resp)
 
         if mode == "fusion":
+            if req.get("stream"):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        "type": "invalid_request_error",
+                        "message": "fusion mode does not support streaming",
+                    },
+                )
             import json as _json
             try:
                 fusion_cfg = _json.loads(route.get("fusion_config") or "{}")
@@ -1248,8 +1339,17 @@ def create_app() -> FastAPI:
                     },
                 )
             strategy = fusion_cfg.get("strategy", "compare_and_synthesize")
-            min_candidates = int(fusion_cfg.get("min_candidates", 2))
-            timeout_seconds = int(fusion_cfg.get("timeout_seconds", 30))
+            try:
+                min_candidates = max(1, int(fusion_cfg.get("min_candidates", 2)))
+                timeout_seconds = max(1, int(fusion_cfg.get("timeout_seconds", 30)))
+            except (TypeError, ValueError):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        "type": "invalid_request_error",
+                        "message": "invalid 'min_candidates'/'timeout_seconds' in fusion_config",
+                    },
+                )
 
             candidates = router.resolve_route_auto(
                 alias, group_id=group_id, required_protocol="anthropic",
@@ -1364,6 +1464,10 @@ def create_app() -> FastAPI:
                 detail=f"route '{alias}' has no upstream_path configured.",
             )
 
+        # Bill one request (refunded automatically if the upstream call fails).
+        _bump_key_usage(key, tokens=0)
+        request.state.keyway_billed = (key["key_id"], 0)
+
         extra_headers: dict[str, str] = {}
         for hname, hval in request.headers.items():
             lname = hname.lower()
@@ -1385,7 +1489,7 @@ def create_app() -> FastAPI:
 
     @app.get("/health")
     def health() -> dict:
-        return {"ok": True, "version": "0.1.4"}
+        return {"ok": True, "version": "0.2.0"}
 
     # ==================== Web UI ====================
 
