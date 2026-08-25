@@ -169,13 +169,15 @@ export interface UsageEventV2 {
   readonly requestId: string;
   readonly correlationId: string;
   readonly timestamp: string;
-  readonly source: 'hadamard' | 'keyway' | 'native-cli' | 'import';
+  readonly source: 'hadamard' | 'bridge' | 'keyway' | 'native-cli' | 'import';
   readonly sessionId?: string;
   readonly runId?: string;
   readonly projectId?: string;
   readonly agentId?: string;
   readonly routeId?: string;
   readonly routeAlias?: string;
+  /** Stable Hadamard provider/bridge configuration identifier. */
+  readonly configurationId?: string;
   readonly targetId?: string;
   readonly providerId?: string;
   readonly credentialId?: string;
