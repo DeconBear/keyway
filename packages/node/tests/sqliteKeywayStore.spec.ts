@@ -1,0 +1,216 @@
+import { createHash } from 'node:crypto';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+
+import { afterEach, describe, expect, it } from 'vitest';
+
+import {
+  USAGE_EVENT_VERSION,
+  type BudgetPolicy,
+  type GatewayRoute,
+  type ManagedCredential,
+  type UsageCounters,
+  type UsageEventV2,
+} from '@keyway-router/core';
+
+import { SqliteKeywayStore } from '../src/index.js';
+
+const temporaryDirectories: string[] = [];
+const timestamp = '2026-08-25T00:00:00.000Z';
+
+afterEach(() => {
+  for (const directory of temporaryDirectories.splice(0)) {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+function createStore(): { store: SqliteKeywayStore; filePath: string } {
+  const directory = mkdtempSync(path.join(tmpdir(), 'keyway-store-'));
+  temporaryDirectories.push(directory);
+  const filePath = path.join(directory, 'keyway.db');
+  return {
+    filePath,
+    store: new SqliteKeywayStore({
+      filePath,
+      now: () => new Date(timestamp),
+    }),
+  };
+}
+
+function credential(id: string, priority = 0): ManagedCredential {
+  return {
+    id,
+    providerId: 'ark',
+    secretRef: `secret:${id}`,
+    label: id,
+    priority,
+    weight: 1,
+    enabled: true,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
+}
+
+function usage(totalTokens: number): UsageCounters {
+  return {
+    requests: 1,
+    inputTokens: Math.max(0, totalTokens - 10),
+    outputTokens: Math.min(10, totalTokens),
+    totalTokens,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    reasoningTokens: 0,
+    audioInputTokens: 0,
+    audioOutputTokens: 0,
+    costUsd: totalTokens / 1_000_000,
+    accuracy: 'actual',
+  };
+}
+
+describe('SqliteKeywayStore', () => {
+  it('migrates once and safely reopens schema version 1', () => {
+    const { store, filePath } = createStore();
+    expect(store.schemaVersion()).toBe(1);
+    store.close();
+    const reopened = new SqliteKeywayStore({ filePath });
+    expect(reopened.schemaVersion()).toBe(1);
+    reopened.close();
+  });
+
+  it('persists targets, routes and credential metadata without secret material', async () => {
+    const { store } = createStore();
+    store.saveTarget({
+      kind: 'managed-api',
+      id: 'target.ark',
+      providerId: 'ark',
+      protocol: 'openai',
+      baseUrl: 'https://ark.cn-beijing.volces.com/api/v3',
+      enabled: true,
+    });
+    store.saveCredential(credential('credential.primary'));
+    const route: GatewayRoute = {
+      id: 'route.chat',
+      alias: 'chat',
+      mode: 'direct',
+      enabled: true,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      candidates: [{
+        id: 'candidate.primary',
+        targetId: 'target.ark',
+        upstreamModel: 'glm-5.2',
+        priority: 0,
+        weight: 1,
+        enabled: true,
+      }],
+    };
+    store.saveRoute(route);
+
+    expect(await store.getTarget('target.ark')).toMatchObject({ providerId: 'ark' });
+    expect(await store.getRouteByAlias('chat')).toEqual(route);
+    const credentials = await store.listCredentials('ark');
+    expect(credentials).toEqual([credential('credential.primary')]);
+    expect(JSON.stringify(credentials)).not.toContain('apiKey');
+    store.close();
+  });
+
+  it('serializes concurrent budget reservations and prevents oversell', async () => {
+    const { store } = createStore();
+    const policy: BudgetPolicy = {
+      id: 'budget.monthly',
+      scope: { kind: 'global' },
+      period: 'monthly',
+      metric: 'totalTokens',
+      limit: 100,
+      action: 'deny',
+      enabled: true,
+    };
+    store.saveBudgetPolicy(policy);
+    const [first, second] = await Promise.all([
+      store.transaction(transaction => transaction.reserveBudget('request.first', { totalTokens: 60 })),
+      store.transaction(transaction => transaction.reserveBudget('request.second', { totalTokens: 60 })),
+    ]);
+    expect(first.reservations).toHaveLength(1);
+    expect(second.reservations).toHaveLength(0);
+    expect(second.decisions[0]?.decision).toBe('denied');
+
+    await store.transaction(transaction => transaction.reconcileBudget(first.reservations, usage(40)));
+    const third = await store.transaction(transaction => transaction.reserveBudget(
+      'request.third',
+      { totalTokens: 60 },
+    ));
+    expect(third.reservations).toHaveLength(1);
+    store.close();
+  });
+
+  it('opens and resets credential circuits using Python v0.2 thresholds', async () => {
+    const { store } = createStore();
+    store.saveCredential(credential('credential.primary'));
+    await store.recordCredentialFailure('credential.primary', timestamp, true);
+    await store.recordCredentialFailure('credential.primary', timestamp, true);
+    expect((await store.getCredentialHealth('credential.primary'))?.state).toBe('degraded');
+    await store.recordCredentialFailure('credential.primary', timestamp, true);
+    expect(await store.getCredentialHealth('credential.primary')).toMatchObject({
+      state: 'circuit-open',
+      consecutiveFailures: 3,
+    });
+    await store.recordCredentialSuccess('credential.primary', timestamp);
+    expect(await store.getCredentialHealth('credential.primary')).toMatchObject({
+      state: 'healthy',
+      consecutiveFailures: 0,
+    });
+    store.close();
+  });
+
+  it('stores only issued-key hashes and clamps refunded counters', () => {
+    const { store } = createStore();
+    const plaintext = 'db_sk_test_plaintext';
+    const keyHash = createHash('sha256').update(plaintext).digest('hex');
+    store.saveIssuedKey({
+      id: 'issued.1',
+      groupId: 'default',
+      keyHash,
+      prefix: 'db_sk_te',
+      name: 'test',
+      enabled: true,
+      maxRequests: 10,
+      usedRequests: 1,
+      maxTokens: 1000,
+      usedTokens: 100,
+      createdAt: timestamp,
+    });
+    store.adjustIssuedKeyUsage('issued.1', -5, -500);
+    const stored = store.getIssuedKeyByHash(keyHash);
+    expect(stored).toMatchObject({ usedRequests: 0, usedTokens: 0, prefix: 'db_sk_te' });
+    expect(JSON.stringify(stored)).not.toContain(plaintext);
+    store.close();
+  });
+
+  it('writes and filters cache-aware usage events', async () => {
+    const { store } = createStore();
+    const event: UsageEventV2 = {
+      version: USAGE_EVENT_VERSION,
+      eventId: 'event.1',
+      requestId: 'request.1',
+      correlationId: 'correlation.1',
+      timestamp,
+      source: 'keyway',
+      providerId: 'ark',
+      credentialId: 'credential.primary',
+      routeId: 'route.chat',
+      requestedModel: 'chat',
+      resolvedModel: 'glm-5.2',
+      operation: 'stream',
+      status: 'succeeded',
+      usage: { ...usage(30), cacheReadTokens: 20 },
+      attempts: [],
+      durationMs: 100,
+      streaming: true,
+    };
+    await store.append(event);
+    expect(store.queryUsage({ providerId: 'ark' })).toEqual([event]);
+    expect(store.queryUsage({ providerId: 'other' })).toEqual([]);
+    store.close();
+  });
+});

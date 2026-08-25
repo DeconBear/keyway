@@ -111,8 +111,31 @@ export interface BudgetReservation {
   readonly requestId: string;
   readonly policyId: string;
   readonly metric: BudgetMetric;
+  readonly periodKey: string;
   readonly reserved: number;
   readonly createdAt: string;
+}
+
+export interface BudgetContext {
+  readonly providerId?: string;
+  readonly credentialId?: string;
+  readonly routeId?: string;
+  readonly model?: string;
+}
+
+export interface BudgetDecision {
+  readonly policyId: string;
+  readonly decision: 'allowed' | 'warned' | 'denied' | 'fallback';
+  readonly used: number;
+  readonly reserved: number;
+  readonly requested: number;
+  readonly limit: number;
+  readonly fallbackRouteId?: string;
+}
+
+export interface BudgetReservationOutcome {
+  readonly reservations: readonly BudgetReservation[];
+  readonly decisions: readonly BudgetDecision[];
 }
 
 export interface KeyQuota {
@@ -234,7 +257,11 @@ export interface KeywayTransaction {
   listCredentials(providerId: string): Promise<readonly ManagedCredential[]>;
   getCredentialHealth(credentialId: string): Promise<CredentialHealth | undefined>;
   listBudgetPolicies(): Promise<readonly BudgetPolicy[]>;
-  reserveBudget(requestId: string, estimatedUsage: Partial<UsageCounters>): Promise<readonly BudgetReservation[]>;
+  reserveBudget(
+    requestId: string,
+    estimatedUsage: Partial<UsageCounters>,
+    context?: BudgetContext,
+  ): Promise<BudgetReservationOutcome>;
   reconcileBudget(reservations: readonly BudgetReservation[], usage: UsageCounters): Promise<void>;
   recordCredentialSuccess(credentialId: string, at: string): Promise<void>;
   recordCredentialFailure(credentialId: string, at: string, retryable: boolean): Promise<void>;

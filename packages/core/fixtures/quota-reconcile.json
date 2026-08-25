@@ -13,6 +13,7 @@
     "requestId": "request.1",
     "policyId": "budget.monthly",
     "metric": "totalTokens",
+    "periodKey": "2026-08",
     "reserved": 4096,
     "createdAt": "2026-08-25T00:00:00.000Z"
   },
