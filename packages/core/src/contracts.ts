@@ -255,6 +255,7 @@ export interface UsageSink {
 
 export interface KeywayTransaction {
   getRouteByAlias(alias: string): Promise<GatewayRoute | undefined>;
+  getRouteById(id: string): Promise<GatewayRoute | undefined>;
   getTarget(id: string): Promise<ExecutionTarget | undefined>;
   listCredentials(providerId: string): Promise<readonly ManagedCredential[]>;
   getCredentialHealth(credentialId: string): Promise<CredentialHealth | undefined>;

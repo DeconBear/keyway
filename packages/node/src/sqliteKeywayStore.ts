@@ -311,6 +311,23 @@ export class SqliteKeywayStore implements KeywayStore, KeywayTransaction, UsageS
     };
   }
 
+  async getRouteById(id: string): Promise<GatewayRoute | undefined> {
+    const route = record(this.database.prepare('SELECT * FROM gateway_routes WHERE id = ?').get(id));
+    if (!route) return undefined;
+    const candidates = this.database.prepare(`
+      SELECT * FROM route_candidates WHERE route_id = ? ORDER BY priority ASC, id ASC
+    `).all(stringValue(route.id, 'route.id')).map(value => candidateFromRow(recordRequired(value)));
+    return {
+      id: stringValue(route.id, 'route.id'),
+      alias: stringValue(route.alias, 'route.alias'),
+      mode: stringValue(route.mode, 'route.mode') as GatewayRoute['mode'],
+      enabled: booleanValue(route.enabled),
+      createdAt: stringValue(route.created_at, 'route.created_at'),
+      updatedAt: stringValue(route.updated_at, 'route.updated_at'),
+      candidates,
+    };
+  }
+
   async getTarget(id: string): Promise<ExecutionTarget | undefined> {
     const row = record(this.database.prepare('SELECT * FROM execution_targets WHERE id = ?').get(id));
     if (!row) return undefined;

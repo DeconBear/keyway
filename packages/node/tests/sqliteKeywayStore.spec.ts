@@ -109,6 +109,7 @@ describe('SqliteKeywayStore', () => {
 
     expect(await store.getTarget('target.ark')).toMatchObject({ providerId: 'ark' });
     expect(await store.getRouteByAlias('chat')).toEqual(route);
+    expect(await store.getRouteById('route.chat')).toEqual(route);
     const credentials = await store.listCredentials('ark');
     expect(credentials).toEqual([credential('credential.primary')]);
     expect(JSON.stringify(credentials)).not.toContain('apiKey');
