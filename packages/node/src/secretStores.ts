@@ -1,5 +1,5 @@
 import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import type { SecretStore } from '@keyway-router/core';
@@ -141,10 +141,13 @@ export class EncryptedFileSecretStore implements SecretStore {
   }
 
   private async save(document: EncryptedSecretDocument): Promise<void> {
-    await mkdir(path.dirname(this.filePath), { recursive: true, mode: 0o700 });
+    const directory = path.dirname(this.filePath);
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+    if (process.platform !== 'win32') await chmod(directory, 0o700);
     const temporary = `${this.filePath}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
     await writeFile(temporary, `${JSON.stringify(document)}\n`, { encoding: 'utf8', mode: 0o600 });
     await rename(temporary, this.filePath);
+    if (process.platform !== 'win32') await chmod(this.filePath, 0o600);
   }
 }
 

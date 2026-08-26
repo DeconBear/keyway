@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -55,6 +55,14 @@ describe('EncryptedFileSecretStore', () => {
     ]);
     expect(await store.resolve('secret:first')).toBe('first-value');
     expect(await store.resolve('secret:second')).toBe('second-value');
+  });
+
+  it.skipIf(process.platform === 'win32')('tightens POSIX directory and file permissions', async () => {
+    const { store, filePath } = encryptedStore();
+    chmodSync(path.dirname(filePath), 0o755);
+    await store.put('secret:private', 'private-value');
+    expect(statSync(path.dirname(filePath)).mode & 0o777).toBe(0o700);
+    expect(statSync(filePath).mode & 0o777).toBe(0o600);
   });
 });
 

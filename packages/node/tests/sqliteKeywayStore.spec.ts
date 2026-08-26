@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { chmodSync, mkdtempSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -82,6 +82,17 @@ describe('SqliteKeywayStore', () => {
     const reopened = new SqliteKeywayStore({ filePath });
     expect(reopened.schemaVersion()).toBe(1);
     reopened.close();
+  });
+
+  it.skipIf(process.platform === 'win32')('tightens POSIX storage permissions', () => {
+    const directory = mkdtempSync(path.join(tmpdir(), 'keyway-store-permissions-'));
+    temporaryDirectories.push(directory);
+    chmodSync(directory, 0o755);
+    const filePath = path.join(directory, 'keyway.db');
+    const store = new SqliteKeywayStore({ filePath });
+    expect(statSync(directory).mode & 0o777).toBe(0o700);
+    expect(statSync(filePath).mode & 0o777).toBe(0o600);
+    store.close();
   });
 
   it('persists targets, routes and credential metadata without secret material', async () => {
@@ -310,6 +321,10 @@ describe('SqliteKeywayStore', () => {
     const restored = path.join(directory, 'restored.sqlite');
     backupSqliteKeywayDatabase(filePath, backup);
     restoreSqliteKeywayDatabase(backup, restored);
+    if (process.platform !== 'win32') {
+      expect(statSync(backup).mode & 0o777).toBe(0o600);
+      expect(statSync(restored).mode & 0o777).toBe(0o600);
+    }
     const reopened = new SqliteKeywayStore({ filePath: restored });
     expect(await reopened.listTargets()).toEqual([
       expect.objectContaining({ id: 'target.codex', runtime: 'codex' }),

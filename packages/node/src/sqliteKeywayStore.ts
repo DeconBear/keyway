@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { mkdirSync } from 'node:fs';
+import { chmodSync, mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
@@ -77,8 +77,11 @@ export class SqliteKeywayStore implements KeywayStore, KeywayAdminStore, KeywayT
 
   constructor(options: SqliteKeywayStoreOptions) {
     const filePath = path.resolve(options.filePath);
-    mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
+    const directory = path.dirname(filePath);
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    if (process.platform !== 'win32') chmodSync(directory, 0o700);
     this.database = new DatabaseSync(filePath);
+    if (process.platform !== 'win32') chmodSync(filePath, 0o600);
     this.now = options.now ?? (() => new Date());
     this.idFactory = options.idFactory ?? randomUUID;
     this.database.exec('PRAGMA foreign_keys = ON');

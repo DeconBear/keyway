@@ -1,4 +1,4 @@
-import { copyFileSync, existsSync, mkdirSync, renameSync, rmSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, renameSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
@@ -143,7 +143,9 @@ export function backupSqliteKeywayDatabase(sourceFile: string, destinationFile: 
   const destination = path.resolve(destinationFile);
   if (!existsSync(source)) throw new TypeError('Keyway database does not exist.');
   if (existsSync(destination)) throw new TypeError('Backup destination already exists.');
-  mkdirSync(path.dirname(destination), { recursive: true, mode: 0o700 });
+  const destinationDirectory = path.dirname(destination);
+  mkdirSync(destinationDirectory, { recursive: true, mode: 0o700 });
+  protectPosixPath(destinationDirectory, 0o700);
   const database = new DatabaseSync(source);
   try {
     database.exec('PRAGMA wal_checkpoint(FULL)');
@@ -151,6 +153,7 @@ export function backupSqliteKeywayDatabase(sourceFile: string, destinationFile: 
   } finally {
     database.close();
   }
+  protectPosixPath(destination, 0o600);
 }
 
 export function restoreSqliteKeywayDatabase(
@@ -169,11 +172,18 @@ export function restoreSqliteKeywayDatabase(
   } finally {
     database.close();
   }
-  mkdirSync(path.dirname(destination), { recursive: true, mode: 0o700 });
+  const destinationDirectory = path.dirname(destination);
+  mkdirSync(destinationDirectory, { recursive: true, mode: 0o700 });
+  protectPosixPath(destinationDirectory, 0o700);
   const temporary = `${destination}.restore-${process.pid}`;
   copyFileSync(backup, temporary);
   if (options.overwrite) rmSync(destination, { force: true });
   renameSync(temporary, destination);
+  protectPosixPath(destination, 0o600);
+}
+
+function protectPosixPath(filePath: string, mode: number): void {
+  if (process.platform !== 'win32') chmodSync(filePath, mode);
 }
 
 export type KeywaySqlitePortableStore = SqliteKeywayStore;
