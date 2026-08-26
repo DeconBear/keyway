@@ -9,10 +9,10 @@
     "node": "^22.13.0 || ^24.0.0"
   },
   "scripts": {
-    "build": "npm run build --workspace @keyway-router/core && npm run build --workspace @keyway-router/node",
+    "build": "npm run build --workspace @keyway-router/core && npm run build --workspace @keyway-router/node && npm run build --workspace @keyway-router/gateway",
     "typecheck": "npm run build --workspace @keyway-router/core && npm run typecheck --workspaces --if-present",
     "test": "npm run build --workspace @keyway-router/core && npm run test --workspaces --if-present",
-    "pack:check": "npm pack --dry-run --workspace @keyway-router/core --workspace @keyway-router/node",
+    "pack:check": "npm pack --dry-run --workspace @keyway-router/core --workspace @keyway-router/node --workspace @keyway-router/gateway",
     "bench:storage": "node scripts/bench-storage.mjs"
   },
   "devDependencies": {

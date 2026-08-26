@@ -72,6 +72,7 @@ export class SqliteKeywayStore implements KeywayStore, KeywayAdminStore, KeywayT
   private readonly now: () => Date;
   private readonly idFactory: () => string;
   private transactionTail: Promise<void> = Promise.resolve();
+  private transactionActive = false;
   private closed = false;
 
   constructor(options: SqliteKeywayStoreOptions) {
@@ -105,6 +106,7 @@ export class SqliteKeywayStore implements KeywayStore, KeywayAdminStore, KeywayT
     this.transactionTail = new Promise<void>(resolve => { release = resolve; });
     await previous;
     this.database.exec('BEGIN IMMEDIATE');
+    this.transactionActive = true;
     try {
       const result = await operation(this);
       this.database.exec('COMMIT');
@@ -113,6 +115,7 @@ export class SqliteKeywayStore implements KeywayStore, KeywayAdminStore, KeywayT
       this.database.exec('ROLLBACK');
       throw error;
     } finally {
+      this.transactionActive = false;
       release();
     }
   }
@@ -206,7 +209,8 @@ export class SqliteKeywayStore implements KeywayStore, KeywayAdminStore, KeywayT
 
   saveRoute(route: GatewayRoute): void {
     assertGatewayRoute(route);
-    this.database.exec('BEGIN IMMEDIATE');
+    const ownsTransaction = !this.transactionActive;
+    if (ownsTransaction) this.database.exec('BEGIN IMMEDIATE');
     try {
       this.database.prepare(`
         INSERT INTO gateway_routes (id, alias, mode, enabled, created_at, updated_at)
@@ -234,9 +238,9 @@ export class SqliteKeywayStore implements KeywayStore, KeywayAdminStore, KeywayT
           candidate.enabled ? 1 : 0,
         );
       }
-      this.database.exec('COMMIT');
+      if (ownsTransaction) this.database.exec('COMMIT');
     } catch (error) {
-      this.database.exec('ROLLBACK');
+      if (ownsTransaction) this.database.exec('ROLLBACK');
       throw error;
     }
   }
@@ -335,6 +339,17 @@ export class SqliteKeywayStore implements KeywayStore, KeywayAdminStore, KeywayT
   getIssuedKeyByHash(keyHash: string): IssuedKeyRecord | undefined {
     const row = record(this.database.prepare('SELECT * FROM issued_keys WHERE key_hash = ?').get(keyHash));
     return row ? issuedKeyFromRow(row) : undefined;
+  }
+
+  listIssuedKeys(): readonly IssuedKeyRecord[] {
+    return this.database.prepare('SELECT * FROM issued_keys ORDER BY created_at ASC, id ASC')
+      .all()
+      .map(value => issuedKeyFromRow(recordRequired(value)));
+  }
+
+  deleteIssuedKey(keyId: string): boolean {
+    const result = this.database.prepare('DELETE FROM issued_keys WHERE id = ?').run(keyId);
+    return Number(result.changes) > 0;
   }
 
   adjustIssuedKeyUsage(keyId: string, requests: number, tokens: number): void {
@@ -575,7 +590,7 @@ export class SqliteKeywayStore implements KeywayStore, KeywayAdminStore, KeywayT
   async append(event: UsageEventV2): Promise<void> {
     assertUsageEventV2(event);
     this.database.prepare(`
-      INSERT INTO usage_events (
+      INSERT OR IGNORE INTO usage_events (
         event_id, request_id, timestamp, source, provider_id, credential_id,
         route_id, model, status, total_tokens, cost_usd, event_json
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)

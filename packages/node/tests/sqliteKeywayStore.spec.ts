@@ -14,7 +14,13 @@ import {
   type UsageEventV2,
 } from '@keyway-router/core';
 
-import { SqliteKeywayStore } from '../src/index.js';
+import {
+  SqliteKeywayStore,
+  backupSqliteKeywayDatabase,
+  exportKeywayV1,
+  importKeywayV1,
+  restoreSqliteKeywayDatabase,
+} from '../src/index.js';
 
 const temporaryDirectories: string[] = [];
 const timestamp = '2026-08-25T00:00:00.000Z';
@@ -239,5 +245,75 @@ describe('SqliteKeywayStore', () => {
     expect(store.queryUsage({ providerId: 'ark' })).toEqual([event]);
     expect(store.queryUsage({ providerId: 'other' })).toEqual([]);
     store.close();
+  });
+
+  it('exports a secret-free snapshot and imports it atomically', async () => {
+    const { store } = createStore();
+    store.saveTarget({
+      kind: 'managed-api',
+      id: 'target.ark',
+      providerId: 'ark',
+      protocol: 'openai',
+      baseUrl: 'https://ark.example.test/v1',
+      enabled: true,
+    });
+    store.saveCredential(credential('credential.primary'));
+    store.saveRoute({
+      id: 'route.chat',
+      alias: 'chat',
+      mode: 'direct',
+      enabled: true,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      candidates: [{ id: 'candidate.1', targetId: 'target.ark', upstreamModel: 'glm-5.2', priority: 0, weight: 1, enabled: true }],
+    });
+    const snapshot = await exportKeywayV1(store, () => new Date(timestamp));
+    expect(JSON.stringify(snapshot)).not.toContain('secretRef');
+    expect(JSON.stringify(snapshot)).not.toContain('keyHash');
+
+    const destination = createStore().store;
+    await expect(importKeywayV1(destination, snapshot)).resolves.toMatchObject({
+      targets: 1,
+      credentialMetadata: 1,
+      routes: 1,
+    });
+    expect(await destination.listManagedCredentials()).toEqual([
+      expect.objectContaining({
+        id: 'credential.primary',
+        enabled: false,
+        secretRef: 'secret:credential.primary',
+      }),
+    ]);
+    destination.close();
+
+    const rollback = createStore().store;
+    const saveRoute = rollback.saveRoute.bind(rollback);
+    rollback.saveRoute = () => { throw new Error('route import failed'); };
+    await expect(importKeywayV1(rollback, snapshot)).rejects.toThrow('route import failed');
+    rollback.saveRoute = saveRoute;
+    expect(await rollback.listTargets()).toEqual([]);
+    rollback.close();
+    store.close();
+  });
+
+  it('backs up, integrity-checks and restores SQLite state', async () => {
+    const { store, filePath } = createStore();
+    store.saveTarget({
+      kind: 'native-cli',
+      id: 'target.codex',
+      runtime: 'codex',
+      enabled: true,
+    });
+    store.close();
+    const directory = path.dirname(filePath);
+    const backup = path.join(directory, 'backup.sqlite');
+    const restored = path.join(directory, 'restored.sqlite');
+    backupSqliteKeywayDatabase(filePath, backup);
+    restoreSqliteKeywayDatabase(backup, restored);
+    const reopened = new SqliteKeywayStore({ filePath: restored });
+    expect(await reopened.listTargets()).toEqual([
+      expect.objectContaining({ id: 'target.codex', runtime: 'codex' }),
+    ]);
+    reopened.close();
   });
 });
