@@ -108,11 +108,37 @@ describe('SqliteKeywayStore', () => {
     store.saveRoute(route);
 
     expect(await store.getTarget('target.ark')).toMatchObject({ providerId: 'ark' });
+    expect(await store.listTargets()).toEqual([expect.objectContaining({ id: 'target.ark' })]);
     expect(await store.getRouteByAlias('chat')).toEqual(route);
     expect(await store.getRouteById('route.chat')).toEqual(route);
+    expect(await store.listRoutes()).toEqual([route]);
     const credentials = await store.listCredentials('ark');
     expect(credentials).toEqual([credential('credential.primary')]);
+    expect(await store.listManagedCredentials()).toEqual([credential('credential.primary')]);
     expect(JSON.stringify(credentials)).not.toContain('apiKey');
+    expect(() => store.deleteTarget('target.ark')).toThrow();
+    expect(store.deleteRoute('route.chat')).toBe(true);
+    expect(store.deleteTarget('target.ark')).toBe(true);
+    expect(store.deleteCredential('credential.primary')).toBe(true);
+    store.close();
+  });
+
+  it('lists disabled budget policies for management and deletes them', async () => {
+    const { store } = createStore();
+    const policy: BudgetPolicy = {
+      id: 'budget.disabled',
+      scope: { kind: 'global' },
+      period: 'monthly',
+      metric: 'costUsd',
+      limit: 10,
+      action: 'warn',
+      enabled: false,
+    };
+    store.saveBudgetPolicy(policy);
+    expect(await store.listBudgetPolicies()).toEqual([]);
+    expect(await store.listManagedBudgetPolicies()).toEqual([policy]);
+    expect(store.deleteBudgetPolicy(policy.id)).toBe(true);
+    expect(await store.listManagedBudgetPolicies()).toEqual([]);
     store.close();
   });
 

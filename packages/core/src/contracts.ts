@@ -274,6 +274,22 @@ export interface KeywayStore {
   transaction<T>(operation: (transaction: KeywayTransaction) => Promise<T>): Promise<T>;
 }
 
+/** CRUD surface used by embedding hosts; execution only depends on KeywayStore. */
+export interface KeywayAdminStore extends KeywayStore {
+  saveTarget(target: ExecutionTarget): void;
+  listTargets(): Promise<readonly ExecutionTarget[]>;
+  deleteTarget(targetId: string): boolean;
+  saveCredential(credential: ManagedCredential): void;
+  listManagedCredentials(providerId?: string): Promise<readonly ManagedCredential[]>;
+  deleteCredential(credentialId: string): boolean;
+  saveRoute(route: GatewayRoute): void;
+  listRoutes(): Promise<readonly GatewayRoute[]>;
+  deleteRoute(routeId: string): boolean;
+  saveBudgetPolicy(policy: BudgetPolicy): void;
+  listManagedBudgetPolicies(): Promise<readonly BudgetPolicy[]>;
+  deleteBudgetPolicy(policyId: string): boolean;
+}
+
 export interface KeywayCoreOptions {
   readonly store: KeywayStore;
   readonly secretStore: SecretStore;

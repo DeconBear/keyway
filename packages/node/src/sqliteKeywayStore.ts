@@ -18,6 +18,7 @@ import {
   type ExecutionTarget,
   type GatewayRoute,
   type GatewayRouteCandidate,
+  type KeywayAdminStore,
   type KeywayStore,
   type KeywayTransaction,
   type ManagedCredential,
@@ -66,7 +67,7 @@ export interface UsageQuery {
   readonly offset?: number;
 }
 
-export class SqliteKeywayStore implements KeywayStore, KeywayTransaction, UsageSink {
+export class SqliteKeywayStore implements KeywayStore, KeywayAdminStore, KeywayTransaction, UsageSink {
   private readonly database: DatabaseSync;
   private readonly now: () => Date;
   private readonly idFactory: () => string;
@@ -146,6 +147,20 @@ export class SqliteKeywayStore implements KeywayStore, KeywayTransaction, UsageS
     );
   }
 
+  async listTargets(): Promise<readonly ExecutionTarget[]> {
+    const rows = this.database.prepare('SELECT id FROM execution_targets ORDER BY id ASC').all();
+    const targets = await Promise.all(rows.map(value => (
+      this.getTarget(stringValue(recordRequired(value).id, 'target.id'))
+    )));
+    return targets.filter((target): target is ExecutionTarget => target !== undefined);
+  }
+
+  deleteTarget(targetId: string): boolean {
+    this.assertOpen();
+    const result = this.database.prepare('DELETE FROM execution_targets WHERE id = ?').run(targetId);
+    return Number(result.changes) > 0;
+  }
+
   saveCredential(credential: ManagedCredential): void {
     this.assertOpen();
     this.database.prepare(`
@@ -174,8 +189,19 @@ export class SqliteKeywayStore implements KeywayStore, KeywayTransaction, UsageS
   }
 
   deleteCredential(credentialId: string): boolean {
+    this.assertOpen();
     const result = this.database.prepare('DELETE FROM managed_credentials WHERE id = ?').run(credentialId);
     return Number(result.changes) > 0;
+  }
+
+  async listManagedCredentials(providerId?: string): Promise<readonly ManagedCredential[]> {
+    const sql = providerId
+      ? 'SELECT * FROM managed_credentials WHERE provider_id = ? ORDER BY provider_id, priority, created_at, id'
+      : 'SELECT * FROM managed_credentials ORDER BY provider_id, priority, created_at, id';
+    const rows = providerId
+      ? this.database.prepare(sql).all(providerId)
+      : this.database.prepare(sql).all();
+    return rows.map(value => credentialFromRow(recordRequired(value)));
   }
 
   saveRoute(route: GatewayRoute): void {
@@ -215,6 +241,20 @@ export class SqliteKeywayStore implements KeywayStore, KeywayTransaction, UsageS
     }
   }
 
+  async listRoutes(): Promise<readonly GatewayRoute[]> {
+    const rows = this.database.prepare('SELECT id FROM gateway_routes ORDER BY alias ASC, id ASC').all();
+    const routes = await Promise.all(rows.map(value => (
+      this.getRouteById(stringValue(recordRequired(value).id, 'route.id'))
+    )));
+    return routes.filter((route): route is GatewayRoute => route !== undefined);
+  }
+
+  deleteRoute(routeId: string): boolean {
+    this.assertOpen();
+    const result = this.database.prepare('DELETE FROM gateway_routes WHERE id = ?').run(routeId);
+    return Number(result.changes) > 0;
+  }
+
   saveBudgetPolicy(policy: BudgetPolicy): void {
     assertBudgetPolicy(policy);
     this.database.prepare(`
@@ -239,6 +279,18 @@ export class SqliteKeywayStore implements KeywayStore, KeywayTransaction, UsageS
       policy.fallbackRouteId ?? null,
       policy.enabled ? 1 : 0,
     );
+  }
+
+  async listManagedBudgetPolicies(): Promise<readonly BudgetPolicy[]> {
+    return this.database.prepare('SELECT * FROM budget_policies ORDER BY id ASC')
+      .all()
+      .map(value => policyFromRow(recordRequired(value)));
+  }
+
+  deleteBudgetPolicy(policyId: string): boolean {
+    this.assertOpen();
+    const result = this.database.prepare('DELETE FROM budget_policies WHERE id = ?').run(policyId);
+    return Number(result.changes) > 0;
   }
 
   saveIssuedKey(record: IssuedKeyRecord): void {
