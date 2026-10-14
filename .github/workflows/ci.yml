@@ -7,6 +7,39 @@ on:
     branches: [master, main]
 
 jobs:
+  keyway-typescript:
+    name: Keyway TS (${{ matrix.os }}, Node ${{ matrix.node-version }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        node-version: ["22.13.0", "24"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Typecheck packages
+        run: npm run typecheck
+
+      - name: Run package tests
+        run: npm test
+
+      - name: Build packages
+        run: npm run build
+
+      - name: Verify package contents
+        run: npm run pack:check
+
   test:
     runs-on: ${{ matrix.os }}
     strategy:

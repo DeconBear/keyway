@@ -14,9 +14,13 @@ data/
 logs/
 .admin_token
 .pytest_cache/
+.pytest-tmp/
 .mypy_cache/
 .venv/
 venv/
+node_modules/
+packages/*/dist/
+*.tgz
 docs/
 _site/
 AGENTS.md
